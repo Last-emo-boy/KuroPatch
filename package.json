@@ -1,0 +1,29 @@
+{
+  "name": "kuropatch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-powered browser page debugging extension",
+  "type": "module",
+  "scripts": {
+    "clean": "node -e \"const fs=require('fs');if(fs.existsSync('dist'))fs.rmSync('dist',{recursive:true})\"",
+    "build:sidepanel": "cross-env BUILD_TARGET=sidepanel vite build",
+    "build:background": "cross-env BUILD_TARGET=background vite build",
+    "build:content": "cross-env BUILD_TARGET=content vite build",
+    "build:injected": "cross-env BUILD_TARGET=injected vite build",
+    "build": "npm run clean && npm run build:sidepanel && npm run build:background && npm run build:content && npm run build:injected && node scripts/post-build.mjs",
+    "dev": "npm run build"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.304",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.4.1",
+    "cross-env": "^7.0.3",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.1"
+  }
+}
