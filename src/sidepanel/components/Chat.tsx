@@ -1,10 +1,14 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { marked } from 'marked';
 import type { ToolCall, ToolResult } from '../../shared/tools';
 import type { ChatSession, ChatSessionItem, ChatSessionAIMsg } from '../../shared/types';
 import { callAIWithTools, type AIMessage, type AIStreamEvent } from '../services/ai';
 import { executeTool, getToolIcon, getToolDisplayName } from '../services/tools';
 import { getPageContext } from '../services/page';
 import { getChatSessions, saveChatSession, deleteChatSession, getActiveChatSessionId, setActiveChatSessionId } from '../../shared/storage';
+
+// Configure marked for safe rendering
+marked.setOptions({ breaks: true, gfm: true });
 
 // ---- ChatItem for display (extends stored item with typed refs) ----
 interface ChatItem extends ChatSessionItem {}
@@ -26,6 +30,8 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
   const [showSessions, setShowSessions] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const [lastFailedInput, setLastFailedInput] = useState<string | null>(null);
 
   // ---- Persistence helpers ----
   const persistSession = useCallback(async (id: string, newItems: ChatItem[], newAiMsgs: AIMessage[]) => {
@@ -144,8 +150,8 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
   useEffect(() => { scrollToBottom(); }, [items, scrollToBottom]);
   useEffect(() => { inputRef.current?.focus(); }, [loading]);
 
-  const handleSend = async () => {
-    const text = input.trim();
+  const handleSend = async (overrideText?: string) => {
+    const text = (overrideText || input).trim();
     if (!text || loading) return;
 
     // Ensure we have an active session ID
@@ -168,6 +174,11 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
     setInput('');
     setLoading(true);
     setStatus('Analyzing page...');
+    setLastFailedInput(null);
+
+    // Create AbortController
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     let currentItems: ChatItem[] = newItems;
 
@@ -232,6 +243,8 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
         messages,
         executeTool,
         onEvent,
+        10,
+        controller.signal,
       );
 
       const newAiMessages: AIMessage[] = [
@@ -243,18 +256,42 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
       // Persist after AI responds
       await persistSession(sessionId, currentItems, newAiMessages);
     } catch (err: any) {
-      const errItem: ChatItem = {
-        id: `e_${Date.now()}`,
-        type: 'error',
-        content: err.message || 'Failed to get AI response',
-        timestamp: Date.now(),
-      };
-      const errItems = [...currentItems, errItem];
-      setItems(errItems);
-      await persistSession(sessionId, errItems, aiMessages);
+      if (err.name === 'AbortError') {
+        const cancelItem: ChatItem = {
+          id: `e_${Date.now()}`,
+          type: 'error',
+          content: 'Cancelled by user.',
+          timestamp: Date.now(),
+        };
+        const cancelItems = [...currentItems, cancelItem];
+        setItems(cancelItems);
+        await persistSession(sessionId, cancelItems, aiMessages);
+      } else {
+        setLastFailedInput(text);
+        const errItem: ChatItem = {
+          id: `e_${Date.now()}`,
+          type: 'error',
+          content: err.message || 'Failed to get AI response',
+          timestamp: Date.now(),
+        };
+        const errItems = [...currentItems, errItem];
+        setItems(errItems);
+        await persistSession(sessionId, errItems, aiMessages);
+      }
     } finally {
+      abortRef.current = null;
       setLoading(false);
       setStatus('');
+    }
+  };
+
+  const handleCancel = () => {
+    abortRef.current?.abort();
+  };
+
+  const handleRetry = () => {
+    if (lastFailedInput) {
+      handleSend(lastFailedInput);
     }
   };
 
@@ -329,9 +366,13 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
 
       {/* Messages area */}
       <div className="chat-messages" ref={scrollRef}>
-        {items.length === 0 && <WelcomeCard />}
-        {items.map((item) => (
-          <ChatItemView key={item.id} item={item} />
+        {items.length === 0 && <WelcomeCard onSend={handleSend} />}
+        {items.map((item, idx) => (
+          <ChatItemView
+            key={item.id}
+            item={item}
+            onRetry={item.type === 'error' && lastFailedInput ? handleRetry : undefined}
+          />
         ))}
         {loading && status && (
           <div className="chat-status">
@@ -376,15 +417,19 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
           rows={1}
           disabled={loading}
         />
-        <button className="chat-send-btn" onClick={handleSend} disabled={loading || !input.trim()}>
-          {loading ? (
-            <span className="spinner" />
-          ) : (
+        {loading ? (
+          <button className="chat-cancel-btn" onClick={handleCancel} title="Cancel">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+            </svg>
+          </button>
+        ) : (
+          <button className="chat-send-btn" onClick={() => handleSend()} disabled={!input.trim()}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
             </svg>
-          )}
-        </button>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -392,7 +437,7 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
 
 // ---- Sub-components ----
 
-function WelcomeCard() {
+function WelcomeCard({ onSend }: { onSend: (text: string) => void }) {
   return (
     <div className="welcome-card">
       <div className="welcome-icon">
@@ -403,21 +448,32 @@ function WelcomeCard() {
       <h2>KuroPatch</h2>
       <p className="welcome-sub">AI page debugger that acts, not just talks.</p>
       <div className="welcome-hints">
-        <HintChip text="Fix this button's click handler" />
-        <HintChip text="Why is the API failing?" />
-        <HintChip text="Make the header red and bold" />
-        <HintChip text="Hide all ads on this page" />
-        <HintChip text="Find the login form and fill test data" />
+        <HintChip text="Fix this button's click handler" onClick={onSend} />
+        <HintChip text="Why is the API failing?" onClick={onSend} />
+        <HintChip text="Make the header red and bold" onClick={onSend} />
+        <HintChip text="Hide all ads on this page" onClick={onSend} />
+        <HintChip text="Run an accessibility audit" onClick={onSend} />
+        <HintChip text="Take a screenshot of this page" onClick={onSend} />
+        <HintChip text="Show page performance metrics" onClick={onSend} />
       </div>
     </div>
   );
 }
 
-function HintChip({ text }: { text: string }) {
-  return <div className="hint-chip">{text}</div>;
+function HintChip({ text, onClick }: { text: string; onClick: (text: string) => void }) {
+  return <div className="hint-chip" onClick={() => onClick(text)} role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter') onClick(text); }}>{text}</div>;
 }
 
-function ChatItemView({ item }: { item: ChatItem }) {
+function ChatItemView({ item, onRetry }: { item: ChatItem; onRetry?: () => void }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = (text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
   switch (item.type) {
     case 'user':
       return (
@@ -429,9 +485,17 @@ function ChatItemView({ item }: { item: ChatItem }) {
     case 'text':
       return (
         <div className="chat-bubble ai-bubble">
-          <div className="bubble-content" style={{ whiteSpace: 'pre-wrap' }}>
-            {formatAIText(item.content)}
-          </div>
+          <div
+            className="bubble-content markdown-body"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(item.content) }}
+          />
+          <button
+            className="bubble-copy-btn"
+            onClick={() => handleCopy(item.content)}
+            title="Copy"
+          >
+            {copied ? '✓' : '⧉'}
+          </button>
         </div>
       );
 
@@ -453,19 +517,35 @@ function ChatItemView({ item }: { item: ChatItem }) {
         </div>
       );
 
-    case 'tool_result':
+    case 'tool_result': {
+      const tr = item.toolResult!;
+      const imgUrl = extractToolResultImage(tr.result);
       return (
-        <div className={`action-result ${item.toolResult!.success ? 'success' : 'fail'}`}>
-          <span className="result-icon">{item.toolResult!.success ? '✓' : '✗'}</span>
-          <span className="result-text">{item.toolResult!.displayText}</span>
+        <div className={`action-result ${tr.success ? 'success' : 'fail'}`}>
+          <span className="result-icon">{tr.success ? '✓' : '✗'}</span>
+          <span className="result-text">{tr.displayText}</span>
+          {imgUrl && (
+            <div className="result-image">
+              <img
+                src={imgUrl}
+                alt="Screenshot"
+                onClick={() => window.open(imgUrl, '_blank')}
+                title="Click to open full size"
+              />
+            </div>
+          )}
         </div>
       );
+    }
 
     case 'error':
       return (
         <div className="chat-bubble error-bubble">
           <span className="error-icon">⚠</span>
           <span>{item.content}</span>
+          {onRetry && (
+            <button className="retry-btn" onClick={onRetry}>↻ Retry</button>
+          )}
         </div>
       );
 
@@ -474,27 +554,25 @@ function ChatItemView({ item }: { item: ChatItem }) {
   }
 }
 
-function formatAIText(text: string): React.ReactNode {
-  // Simple code block detection
-  const parts = text.split(/(```[\s\S]*?```)/g);
-  return parts.map((part, i) => {
-    if (part.startsWith('```') && part.endsWith('```')) {
-      const code = part.slice(3, -3).replace(/^\w+\n/, ''); // remove language hint
-      return <pre key={i} className="code-block"><code>{code}</code></pre>;
-    }
-    // Inline code
-    const inlined = part.split(/(`[^`]+`)/g);
-    return (
-      <span key={i}>
-        {inlined.map((seg, j) => {
-          if (seg.startsWith('`') && seg.endsWith('`')) {
-            return <code key={j} className="inline-code">{seg.slice(1, -1)}</code>;
-          }
-          return seg;
-        })}
-      </span>
-    );
-  });
+function renderMarkdown(text: string): string {
+  try {
+    const html = marked.parse(text, { async: false }) as string;
+    return html;
+  } catch {
+    // Fallback: escape HTML
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+}
+
+/** Extract image data URL from tool result for display in chat */
+function extractToolResultImage(result: unknown): string | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const r = result as any;
+  if (r.__imageDataUrl) return r.__imageDataUrl;
+  if (r.dataUrl && typeof r.dataUrl === 'string' && r.dataUrl.startsWith('data:image/')) return r.dataUrl;
+  if (r.result?.__imageDataUrl) return r.result.__imageDataUrl;
+  if (r.result?.dataUrl && typeof r.result.dataUrl === 'string' && r.result.dataUrl.startsWith('data:image/')) return r.result.dataUrl;
+  return undefined;
 }
 
 function buildSystemPrompt(context: any, pickedElement?: any): string {
@@ -601,11 +679,55 @@ You have DIRECT ACCESS to the user's current web page through a set of powerful 
 - \`scroll_to\` — Scroll to an element or coordinates
 - \`wait_for\` — Wait for an element to appear in DOM
 
+### 🖱️ Human-Like Automation (Anti-Detection)
+Use these when you need realistic user behavior simulation — e.g. for bot-detection bypass, realistic interaction testing, or when hover/focus states matter.
+- \`human_click\` — Full realistic mouse event chain: mouseover → mouseenter → mousemove (jitter) → mousedown → mouseup → click, with random offset from center and natural timing. Supports right-click and double-click.
+- \`human_type\` — Character-by-character typing with variable inter-key delays (50-200ms), occasional hesitation pauses, and full keydown→keypress→input→keyup per character. Speed options: slow/normal/fast.
+- \`human_move\` — Mouse movement along a Bézier curve with ease-in-out timing. Dispatches mousemove events at each step. Good for triggering hover menus, tooltips, popups.
+- \`human_scroll\` — Inertia-based wheel scrolling with easing, mimicking trackpad/wheel behavior.
+- \`human_drag\` — Full drag-and-drop: mousedown on source → Bézier path mousemove events → mouseup on target. Also dispatches HTML5 DragEvents. Works with sortable lists, sliders, kanban boards, etc.
+
+**When to use human_* vs regular tools:**
+- Use regular \`click\`/\`type_text\` for quick, reliable actions on cooperative pages
+- Use \`human_*\` when: the page has bot detection, hover-dependent UI, drag-drop, or when the user explicitly asks for realistic/human-like behavior
+
 ### 🔧 Advanced
 - \`inject_js\` — Execute arbitrary JavaScript in page context
 - \`start_hooks\` — Begin monitoring: fetch, XHR, console, errors, DOM mutations, navigation
 
-### 💾 Script Persistence (IMPORTANT)
+### � Capture & Visual Feedback
+- \`screenshot\` — Capture a screenshot of the visible page area (returns base64 data URL)
+- \`highlight_element\` — Flash-highlight an element with a colored outline (great for showing users what you found)
+
+### 🗄️ Storage & Cookies
+- \`get_storage\` — Read localStorage, sessionStorage, or cookies (all entries or by key)
+- \`set_storage\` — Write a value to localStorage or sessionStorage
+- \`clear_storage\` — Clear all entries in localStorage, sessionStorage, or cookies
+
+### ♿ Audit & Performance
+- \`accessibility_audit\` — Run an accessibility check (missing alt text, unlabeled inputs, empty links, heading order, contrast, lang attribute). Optionally scope to a selector.
+- \`get_performance\` — Get page performance metrics: load time, TTFB, LCP, CLS, memory usage, DOM size, resource counts
+### 🎯 Multimodal & Coordinate Tools (POWERFUL)
+These tools enable vision-based page interaction. When using a multimodal model (Claude, GPT-4V), screenshots are sent as actual images to the AI for visual analysis.
+
+**Screenshot & Vision:**
+- \`screenshot_element\` — Screenshot a specific element (cropped to its bounding box). Returns base64 image that multimodal models can see. Use for: reading captchas/images, verifying visual rendering, identifying non-DOM content.
+- \`screenshot_area\` — Screenshot a rectangular region by viewport coordinates (x, y, width, height).
+- \`visual_query\` — Take a screenshot and analyze it visually. The screenshot is included as an image in the AI conversation. Use when you need to SEE the page: read captcha text, identify visual elements, check layout, find elements that are hard to locate via DOM.
+
+**Coordinate-Based Interaction:**
+- \`get_element_bounds\` — Get precise bounding rect (x, y, width, height), visibility status, and computed styles of an element.
+- \`find_at_point\` — Identify what element is at specific (x, y) viewport coordinates. Returns tag, text, selector, bounds, attributes. Essential for resolving coordinates returned by multimodal analysis.
+- \`click_at_coords\` — Click at exact (x, y) viewport coordinates with realistic mouse events. Perfect after multimodal model identifies a click target.
+- \`type_at_coords\` — Focus and type text at (x, y) coordinates.
+- \`get_interactive_map\` — Get ALL interactive elements (buttons, links, inputs) with their bounding rectangles and center coordinates. Provides the AI a complete spatial map of the page.
+
+**Multimodal Workflow (for captchas, visual elements, etc.):**
+1. \`screenshot_element\` (or \`visual_query\`) — capture the target
+2. The AI model sees the image and identifies coordinates/text
+3. \`click_at_coords\` / \`type_at_coords\` — act on the coordinates
+4. Verify with another screenshot or DOM check
+### �💾 Script Persistence (IMPORTANT)
 - \`save_script\` — Save a reusable JS/CSS script for the user to run again later
 - \`update_script\` — Update an existing saved script (iterate on code, fix bugs)
 - \`run_script\` — Execute a saved script by ID on the current page
@@ -621,7 +743,12 @@ You have DIRECT ACCESS to the user's current web page through a set of powerful 
 - \`auto\` — runs automatically on every page load (good for ad blockers, custom CSS)
 - \`url-match\` — runs only on matching URLs (e.g. "*://youtube.com/*")
 
+**Script modes:**
+- \`action\` — one-shot: user clicks "Run" and it executes once
+- \`toggle\` — persistent on/off: survives page navigation (auto-reapplied when page reloads while active)
+
 **Workflow:** First test with inject_js → if it works → save_script to persist → user can re-run from Scripts tab anytime. If the user wants changes → update_script to iterate.
+When saving CSS that should persist across pages, use mode="toggle" + trigger="auto" or trigger="url-match".
 
 ## Response Format
 1. **Use tools** to accomplish the task (one or more tool calls).

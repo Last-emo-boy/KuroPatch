@@ -563,7 +563,20 @@ function onHookMessage(e: MessageEvent) {
 }
 
 // ---- Message listener ----
+// Types handled directly by the background service worker.
+// If chrome.runtime.sendMessage also delivers here, we must NOT respond
+// to avoid closing the message channel before the background can reply.
+const BG_DIRECT_TYPES = new Set([
+  'INJECT_JS', 'SCREENSHOT', 'REMOVE_CSS', 'HIGHLIGHT_ELEMENT',
+  'GET_NETWORK_REQUESTS', 'GET_HOOK_EVENTS', 'GET_HOOK_SUMMARY',
+  'GET_PAGE_CONTEXT',
+]);
+
 chrome.runtime.onMessage.addListener((msg: Message, _sender, sendResponse) => {
+  // Let the background handle these — returning undefined (not true) tells
+  // Chrome this listener is not interested, so the channel stays open for bg.
+  if (BG_DIRECT_TYPES.has(msg.type)) return;
+
   (async () => {
     switch (msg.type) {
       case 'READ_DOM':
@@ -588,8 +601,6 @@ chrome.runtime.onMessage.addListener((msg: Message, _sender, sendResponse) => {
         return modifyDom(msg.payload);
       case 'MODIFY_STYLE':
         return modifyStyle(msg.payload);
-      case 'INJECT_JS':
-        return injectJs(msg.payload);
       case 'INJECT_CSS':
         return injectCss(msg.payload);
       case 'AUTOMATE':
@@ -622,3 +633,8 @@ chrome.runtime.onMessage.addListener((msg: Message, _sender, sendResponse) => {
   })().then(sendResponse);
   return true;
 });
+
+// Signal to background that content script is ready
+try {
+  chrome.runtime.sendMessage({ type: 'CONTENT_READY', payload: { url: location.href } });
+} catch (_) { /* extension context may not be ready */ }

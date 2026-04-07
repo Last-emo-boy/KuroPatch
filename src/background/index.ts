@@ -2,8 +2,8 @@
 // Background Service Worker
 // ============================================================
 import type { Message } from '../shared/messaging';
-import type { NetworkRequest, HookEvent, Patch, HookSummary } from '../shared/types';
-import { getAIConfig, getPatches, addPatch, removePatch, setPatches, updatePatch } from '../shared/storage';
+import type { NetworkRequest, HookEvent, Patch, HookSummary, UserScript } from '../shared/types';
+import { getAIConfig, getPatches, addPatch, removePatch, setPatches, updatePatch, getScripts, updateScript } from '../shared/storage';
 
 // --- State per tab ---
 interface TabState {
@@ -147,16 +147,101 @@ function debugLog(...args: unknown[]) {
   if (debugMode) console.log('[KP]', ...args);
 }
 
-console.log('[KP] Background v0.2.1 loaded');
+console.log('[KP] Background v0.2.3 loaded');
+
+// --- Re-apply active scripts on page navigation ---
+// Debounce per tab to prevent double-injection from multiple triggers
+const lastReapply = new Map<number, number>();
+
+async function reapplyActiveScripts(tabId: number, url: string) {
+  // Skip chrome:// and extension pages
+  if (url.startsWith('chrome://') || url.startsWith('chrome-extension://')) return;
+
+  // Debounce: skip if we reapplied this tab within 800ms
+  const now = Date.now();
+  if (now - (lastReapply.get(tabId) || 0) < 800) return;
+  lastReapply.set(tabId, now);
+
+  debugLog('reapplyActiveScripts →', tabId, url);
+
+  try {
+    const scripts = await getScripts();
+    for (const s of scripts) {
+      if (!s.enabled) continue;
+
+      // Re-apply active toggle scripts
+      const shouldReapply = s.mode === 'toggle' && s.active;
+      // Auto-apply scripts that trigger on every page
+      const shouldAutoApply = s.trigger === 'auto' && (s.mode === 'action' || !s.active);
+      // URL-match scripts
+      const shouldUrlMatch = s.trigger === 'url-match' && s.urlPattern && !s.active && matchUrl(url, s.urlPattern);
+
+      if (!shouldReapply && !shouldAutoApply && !shouldUrlMatch) continue;
+
+      debugLog('Script auto-apply:', s.name, '→', url);
+
+      try {
+        if (s.type === 'css') {
+          // Use chrome.scripting.insertCSS — no content script needed, more reliable
+          await chrome.scripting.insertCSS({
+            target: { tabId },
+            css: s.code,
+          });
+          await updateScript(s.id, { active: true, lastRunAt: Date.now(), lastRunResult: '● ON (auto)' });
+        } else {
+          // JS: use chrome.scripting.executeScript directly
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: (c: string) => { try { new Function(c)(); } catch (e: any) { console.error('[KP]', e); } },
+            args: [s.code],
+          });
+          await updateScript(s.id, { active: true, lastRunAt: Date.now(), lastRunResult: '● ON (auto)' });
+        }
+      } catch (e: any) {
+        debugLog('Script auto-apply failed:', s.name, e.message);
+      }
+    }
+  } catch (e) {
+    debugLog('Script reapply error:', e);
+  }
+}
+
+// Trigger 1: Content script signals readiness (most reliable — no race condition)
+// This is handled in the message handler below via CONTENT_READY case
+
+// Trigger 2: SPA navigations (pushState/replaceState) — content script doesn't reinit
+chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
+  if (details.frameId !== 0) return; // main frame only
+  debugLog('SPA navigation detected:', details.tabId, details.url);
+  await reapplyActiveScripts(details.tabId, details.url);
+});
+
+// Trigger 3: Reference-fragment navigations (hash changes within SPA)
+chrome.webNavigation.onReferenceFragmentUpdated.addListener(async (details) => {
+  if (details.frameId !== 0) return;
+  await reapplyActiveScripts(details.tabId, details.url);
+});
+
+function matchUrl(url: string, pattern: string): boolean {
+  try {
+    // Try as regex first
+    return new RegExp(pattern).test(url);
+  } catch {
+    // Fallback: treat as glob-like pattern (convert * to .*)
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}$`).test(url);
+  }
+}
 
 chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) => {
   debugLog('MSG ←', message.type, message.payload, 'from', sender.tab?.id ?? 'sidepanel');
   handleMessage(message, sender).then((result) => {
     debugLog('MSG →', message.type, result);
-    sendResponse(result);
+    try { sendResponse(result); } catch (_) { /* channel already closed */ }
   }).catch((err) => {
     console.error('[KP] Message error:', message.type, err);
-    sendResponse({ error: err.message });
+    try { sendResponse({ error: err.message }); } catch (_) { /* channel already closed */ }
   });
   return true; // keep channel open for async
 });
@@ -204,8 +289,16 @@ async function handleMessage(msg: Message, sender: chrome.runtime.MessageSender)
         const results = await chrome.scripting.executeScript({
           target: { tabId },
           world: 'MAIN',
-          func: (c: string) => {
-            try { return new Function(c)(); } catch (e: any) { return { error: e.message }; }
+          func: async (c: string) => {
+            try {
+              const fn = new Function(c);
+              const result = fn();
+              // Support async/promise-returning scripts
+              if (result && typeof result === 'object' && typeof result.then === 'function') {
+                return await result;
+              }
+              return result;
+            } catch (e: any) { return { error: e.message }; }
           },
           args: [code],
         });
@@ -213,9 +306,35 @@ async function handleMessage(msg: Message, sender: chrome.runtime.MessageSender)
         if (val && typeof val === 'object' && 'error' in (val as any)) {
           return val;
         }
-        return { ok: true, result: val };
+        return { ok: true, result: val ?? null };
       } catch (e: any) {
         return { error: e.message };
+      }
+    }
+
+    // REMOVE_CSS: use chrome.scripting.removeCSS to cleanly undo insertCSS
+    case 'REMOVE_CSS': {
+      const { css } = (msg.payload || {}) as { css: string };
+      try {
+        await chrome.scripting.removeCSS({ target: { tabId }, css });
+        return { ok: true };
+      } catch (e: any) {
+        // Fallback: remove via chrome.scripting.executeScript (no content script dependency)
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: (cssText: string) => {
+              document.querySelectorAll('style').forEach(s => {
+                if (s.textContent === cssText) s.remove();
+              });
+            },
+            args: [css],
+          });
+          return { ok: true };
+        } catch (e2: any) {
+          return { error: e2.message };
+        }
       }
     }
 
@@ -238,6 +357,15 @@ async function handleMessage(msg: Message, sender: chrome.runtime.MessageSender)
 
     case 'GET_PAGE_CONTEXT':
       return sendToTab(tabId, { type: 'READ_DOM' });
+
+    case 'SCREENSHOT': {
+      try {
+        const dataUrl = await chrome.tabs.captureVisibleTab(undefined as any, { format: 'png' });
+        return { ok: true, dataUrl };
+      } catch (e: any) {
+        return { error: `Screenshot failed: ${e.message}` };
+      }
+    }
 
     case 'GET_NETWORK_REQUESTS': {
       await attachDebugger(tabId);
@@ -267,6 +395,15 @@ async function handleMessage(msg: Message, sender: chrome.runtime.MessageSender)
 
     case 'ELEMENT_SELECTED':
       return { ok: true };
+
+    // Content script signals it's fully initialized — re-inject active scripts
+    case 'CONTENT_READY': {
+      const url = sender.tab?.url || (msg.payload as any)?.url || '';
+      debugLog('Content script ready on tab', tabId, url);
+      // Don't await — let it run in background to avoid blocking the response
+      reapplyActiveScripts(tabId, url);
+      return { ok: true };
+    }
 
     case 'TOGGLE_PATCH': {
       const { id, enabled } = msg.payload as { id: string; enabled: boolean };

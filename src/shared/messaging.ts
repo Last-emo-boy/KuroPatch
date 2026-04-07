@@ -42,7 +42,12 @@ export type MessageType =
   | 'HOOK_EVENT'
   | 'CONSOLE_ENTRY'
   | 'PAGE_ERROR'
-  | 'INJECT_CSS';
+  | 'INJECT_CSS'
+  | 'REMOVE_CSS'
+  | 'SCREENSHOT'
+  | 'HIGHLIGHT_ELEMENT'
+  // Content → Background (lifecycle)
+  | 'CONTENT_READY';
 
 export interface Message {
   type: MessageType;

@@ -248,6 +248,7 @@ export interface UserScript {
   lastRunResult?: string;
   tags: string[];
   undoCode?: string; // JS to run when toggling OFF (for toggle mode)
+  activeStyleId?: string; // ID of injected <style> element (for CSS toggle scripts)
 }
 
 // --- Automation ---

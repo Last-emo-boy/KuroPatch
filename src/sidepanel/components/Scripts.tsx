@@ -1,9 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { UserScript } from '../../shared/types';
-import { getScripts, updateScript, removeScript } from '../../shared/storage';
-
-// Track injected CSS style IDs for toggle-mode removal
-const activeStyleIds = new Map<string, string>();
+import { getScripts, updateScript, removeScript, addScript } from '../../shared/storage';
 
 export default function Scripts({ onBack }: { onBack: () => void }) {
   const [scripts, setScripts] = useState<UserScript[]>([]);
@@ -14,6 +11,8 @@ export default function Scripts({ onBack }: { onBack: () => void }) {
   const [runResult, setRunResult] = useState<Record<string, string>>({});
   const [filter, setFilter] = useState('');
   const [tab, setTab] = useState<'all' | 'action' | 'toggle'>('all');
+  const [importMsg, setImportMsg] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     setScripts(await getScripts());
@@ -47,30 +46,34 @@ export default function Scripts({ onBack }: { onBack: () => void }) {
       // Turn OFF
       try {
         if (s.type === 'css') {
-          const styleId = activeStyleIds.get(s.id);
-          if (styleId) {
-            await chrome.runtime.sendMessage({
-              type: 'INJECT_JS',
-              payload: { code: `document.getElementById('${styleId}')?.remove()` },
-            });
-            activeStyleIds.delete(s.id);
-          }
+          // Remove CSS via chrome.scripting.removeCSS (background handles this)
+          await chrome.runtime.sendMessage({
+            type: 'REMOVE_CSS',
+            payload: { css: s.code },
+          });
         } else if (s.undoCode) {
           await chrome.runtime.sendMessage({ type: 'INJECT_JS', payload: { code: s.undoCode } });
         }
         flash(s.id, '○ OFF');
-        await updateScript(s.id, { active: false, lastRunAt: Date.now(), lastRunResult: '○ OFF' });
+        await updateScript(s.id, { active: false, activeStyleId: undefined, lastRunAt: Date.now(), lastRunResult: '○ OFF' });
       } catch (err: any) { flash(s.id, `✗ ${err.message}`); }
     } else {
-      // Turn ON
+      // Turn ON — use chrome.scripting.insertCSS via background for CSS
       try {
-        const result: any = s.type === 'css'
-          ? await chrome.runtime.sendMessage({ type: 'INJECT_CSS', payload: { css: s.code } })
-          : await chrome.runtime.sendMessage({ type: 'INJECT_JS', payload: { code: s.code } });
-        if (result?.styleId) activeStyleIds.set(s.id, result.styleId);
+        let result: any;
+        if (s.type === 'css') {
+          // Background will use chrome.scripting.insertCSS
+          result = await chrome.runtime.sendMessage({ type: 'INJECT_CSS', payload: { css: s.code } });
+        } else {
+          result = await chrome.runtime.sendMessage({ type: 'INJECT_JS', payload: { code: s.code } });
+        }
         const msg = result?.error ? `✗ ${result.error}` : '● ON';
         flash(s.id, msg);
-        await updateScript(s.id, { active: !result?.error, lastRunAt: Date.now(), lastRunResult: msg });
+        await updateScript(s.id, {
+          active: !result?.error,
+          lastRunAt: Date.now(),
+          lastRunResult: msg,
+        });
       } catch (err: any) { flash(s.id, `✗ ${err.message}`); }
     }
     await load();
@@ -99,6 +102,56 @@ export default function Scripts({ onBack }: { onBack: () => void }) {
     await updateScript(editing, { name: editName, description: editDesc, code: editCode });
     setEditing(null);
     await load();
+  };
+
+  // --- Export all scripts as JSON ---
+  const handleExport = () => {
+    if (scripts.length === 0) return;
+    const data = JSON.stringify(scripts, null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `kuropatch-scripts-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // --- Import scripts from JSON ---
+  const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const parsed = JSON.parse(reader.result as string);
+        const arr = Array.isArray(parsed) ? parsed : [parsed];
+        let count = 0;
+        for (const s of arr) {
+          if (!s.name || !s.code || !s.type) continue;
+          await addScript({
+            ...s,
+            id: crypto.randomUUID(),
+            active: false,
+            activeStyleId: undefined,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            lastRunAt: undefined,
+            lastRunResult: undefined,
+          });
+          count++;
+        }
+        setImportMsg(`✓ Imported ${count} script${count !== 1 ? 's' : ''}`);
+        setTimeout(() => setImportMsg(''), 3000);
+        await load();
+      } catch {
+        setImportMsg('✗ Invalid JSON file');
+        setTimeout(() => setImportMsg(''), 3000);
+      }
+      // Reset input so the same file can be re-imported
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+    reader.readAsText(file);
   };
 
   // Filtering by tab + text search
@@ -142,8 +195,12 @@ export default function Scripts({ onBack }: { onBack: () => void }) {
       <div className="scripts-header">
         <button className="btn secondary" onClick={onBack} style={{ padding: '4px 10px', fontSize: 11 }}>← Chat</button>
         <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>Scripts</span>
+        <button className="script-action-btn" onClick={() => fileInputRef.current?.click()} title="Import scripts">⬆</button>
+        <button className="script-action-btn" onClick={handleExport} title="Export scripts" disabled={scripts.length === 0}>⬇</button>
         <span className="scripts-count">{scripts.length}</span>
       </div>
+      <input ref={fileInputRef} type="file" accept=".json" onChange={handleImport} style={{ display: 'none' }} />
+      {importMsg && <div className={`script-import-msg${importMsg.startsWith('✓') ? ' ok' : ' err'}`}>{importMsg}</div>}
 
       {/* Mode tabs */}
       <div className="script-tabs">

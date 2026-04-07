@@ -231,6 +231,191 @@ export const TOOLS: ToolDefinition[] = [
     required: ['selector'],
   },
 
+  // --- Screenshot & Visual tools ---
+  {
+    name: 'screenshot',
+    description: 'Capture a screenshot of the visible page area. Returns a base64 data URL of the PNG image. Use to visually verify changes or document state.',
+    parameters: {},
+  },
+  {
+    name: 'highlight_element',
+    description: 'Temporarily flash/highlight an element on the page to draw attention. Useful after making changes to show what was affected.',
+    parameters: {
+      selector: { type: 'string', description: 'CSS selector of element to highlight' },
+      color: { type: 'string', description: 'Highlight color (default: "#7c6aff")' },
+      duration: { type: 'number', description: 'Duration in ms (default: 1500)' },
+    },
+    required: ['selector'],
+  },
+
+  // --- Storage & Cookie tools ---
+  {
+    name: 'get_storage',
+    description: 'Read localStorage, sessionStorage, or cookies from the page. Use for debugging auth tokens, cached data, or user preferences.',
+    parameters: {
+      type: { type: 'string', description: 'Storage type to read', enum: ['localStorage', 'sessionStorage', 'cookies'] },
+      key: { type: 'string', description: 'Specific key to read (omit for all)' },
+    },
+    required: ['type'],
+  },
+  {
+    name: 'set_storage',
+    description: 'Write to localStorage or sessionStorage. Use for testing with different cached values or user states.',
+    parameters: {
+      type: { type: 'string', description: 'Storage type', enum: ['localStorage', 'sessionStorage'] },
+      key: { type: 'string', description: 'Key to set' },
+      value: { type: 'string', description: 'Value to set' },
+    },
+    required: ['type', 'key', 'value'],
+  },
+  {
+    name: 'clear_storage',
+    description: 'Clear localStorage, sessionStorage, or all cookies. Use to test fresh/clean state.',
+    parameters: {
+      type: { type: 'string', description: 'Storage type to clear', enum: ['localStorage', 'sessionStorage', 'cookies'] },
+    },
+    required: ['type'],
+  },
+
+  // --- Accessibility & Performance tools ---
+  {
+    name: 'accessibility_audit',
+    description: 'Run a basic accessibility audit on the page. Checks: images without alt text, missing form labels, low-contrast text, missing ARIA roles, empty links/buttons, missing lang attribute, missing page title. Returns list of issues found.',
+    parameters: {
+      selector: { type: 'string', description: 'Scope audit to a specific element (optional, default: entire page)' },
+    },
+  },
+  {
+    name: 'get_performance',
+    description: 'Get page performance metrics: load timing, largest contentful paint (LCP), cumulative layout shift (CLS), first input delay (FID), memory usage, DOM node count, resource loading stats.',
+    parameters: {},
+  },
+
+  // --- Human-like automation tools ---
+  {
+    name: 'human_click',
+    description: 'Simulate a human-like click on an element. Unlike `click`, this dispatches a full realistic mouse event sequence (mouseover → mouseenter → mousemove × N → mousedown → mouseup → click) with a random offset from center and natural timing jitter. Useful for bypassing bot-detection, testing real user interactions, or triggering hover-dependent UI.',
+    parameters: {
+      selector: { type: 'string', description: 'CSS selector of the target element' },
+      button: { type: 'string', description: 'Mouse button: "left" (default), "right", "middle"', enum: ['left', 'right', 'middle'] },
+      doubleClick: { type: 'boolean', description: 'If true, perform a double click' },
+    },
+    required: ['selector'],
+  },
+  {
+    name: 'human_type',
+    description: 'Type text into an input character by character with human-like timing. Each character is typed with a random delay (50-180ms by default), simulating natural keystroke cadence. Dispatches keydown → keypress → input → keyup per character. Works with React/Vue controlled inputs.',
+    parameters: {
+      selector: { type: 'string', description: 'CSS selector of the input/textarea' },
+      text: { type: 'string', description: 'Text to type' },
+      speed: { type: 'string', description: 'Typing speed: "slow" (~200ms/char), "normal" (~100ms/char), "fast" (~50ms/char)', enum: ['slow', 'normal', 'fast'] },
+      clearFirst: { type: 'boolean', description: 'Clear existing value before typing (default: true)' },
+    },
+    required: ['selector', 'text'],
+  },
+  {
+    name: 'human_move',
+    description: 'Simulate human-like mouse movement to an element. Generates a Bézier curve trajectory from a random starting point to the target, dispatching mousemove events along the path. Useful for triggering hover states, tooltips, dropdowns, or warm-up before a click.',
+    parameters: {
+      selector: { type: 'string', description: 'CSS selector to move mouse toward' },
+      steps: { type: 'number', description: 'Number of intermediate mousemove events (default: 15, more = smoother)' },
+    },
+    required: ['selector'],
+  },
+  {
+    name: 'human_scroll',
+    description: 'Simulate human-like scrolling with inertia and variable speed. Instead of instant scroll, this dispatches multiple wheel events with easing, mimicking a real mouse wheel or trackpad scroll.',
+    parameters: {
+      selector: { type: 'string', description: 'CSS selector to scroll to (optional — uses coordinates if omitted)' },
+      direction: { type: 'string', description: 'Scroll direction: "down", "up" (used when no selector)', enum: ['down', 'up'] },
+      distance: { type: 'number', description: 'Pixel distance to scroll (default: 600, used when no selector)' },
+    },
+  },
+  {
+    name: 'human_drag',
+    description: 'Simulate a human-like drag and drop. Dispatches mousedown on source → multiple mousemove events along a Bézier path → mouseup + drop on target. Works with native drag-and-drop, sortable lists, sliders, etc.',
+    parameters: {
+      from: { type: 'string', description: 'CSS selector of the drag source element' },
+      to: { type: 'string', description: 'CSS selector of the drop target element' },
+      steps: { type: 'number', description: 'Intermediate move events during drag (default: 20)' },
+    },
+    required: ['from', 'to'],
+  },
+
+  // --- Multimodal & coordinate tools ---
+  {
+    name: 'screenshot_element',
+    description: 'Take a screenshot cropped to a specific element. Returns a base64 data URL image. When the AI model is multimodal, it can analyze the screenshot visually. Great for: reading text in images/canvas, identifying visual elements, verifying CSS rendering, capturing component state, captcha images.',
+    parameters: {
+      selector: { type: 'string', description: 'CSS selector of the element to screenshot' },
+    },
+    required: ['selector'],
+  },
+  {
+    name: 'screenshot_area',
+    description: 'Take a screenshot of a specific rectangular region of the viewport. Returns a base64 data URL image. Useful for capturing a portion of the page without needing a specific selector.',
+    parameters: {
+      x: { type: 'number', description: 'X coordinate of the top-left corner (viewport pixels)' },
+      y: { type: 'number', description: 'Y coordinate of the top-left corner (viewport pixels)' },
+      width: { type: 'number', description: 'Width of the capture region in pixels' },
+      height: { type: 'number', description: 'Height of the capture region in pixels' },
+    },
+    required: ['x', 'y', 'width', 'height'],
+  },
+  {
+    name: 'get_element_bounds',
+    description: 'Get the precise bounding rectangle, visibility, and computed styles of an element. Returns x, y, width, height, isVisible, isInViewport, and key computed styles (color, bgColor, fontSize, display, position, opacity, zIndex). Essential for coordinate-based operations.',
+    parameters: {
+      selector: { type: 'string', description: 'CSS selector' },
+    },
+    required: ['selector'],
+  },
+  {
+    name: 'find_at_point',
+    description: 'Identify the element at specific viewport coordinates. Returns tag name, text content, selector, bounding rect, and attributes. Useful after a multimodal model returns coordinates from a screenshot — use this to resolve coordinates to a concrete element.',
+    parameters: {
+      x: { type: 'number', description: 'X viewport coordinate' },
+      y: { type: 'number', description: 'Y viewport coordinate' },
+    },
+    required: ['x', 'y'],
+  },
+  {
+    name: 'click_at_coords',
+    description: 'Click at exact viewport coordinates (x, y). Dispatches a full mouse event sequence on whatever element is at that point. Useful after multimodal analysis returns click targets as coordinates. Combines human-like timing with coordinate precision.',
+    parameters: {
+      x: { type: 'number', description: 'X viewport coordinate' },
+      y: { type: 'number', description: 'Y viewport coordinate' },
+      button: { type: 'string', description: 'Mouse button: "left" (default), "right"', enum: ['left', 'right'] },
+    },
+    required: ['x', 'y'],
+  },
+  {
+    name: 'type_at_coords',
+    description: 'Focus the element at (x, y) coordinates and type text into it. Useful when multimodal analysis identifies an input field by position rather than selector.',
+    parameters: {
+      x: { type: 'number', description: 'X viewport coordinate of the input' },
+      y: { type: 'number', description: 'Y viewport coordinate of the input' },
+      text: { type: 'string', description: 'Text to type' },
+    },
+    required: ['x', 'y', 'text'],
+  },
+  {
+    name: 'get_interactive_map',
+    description: 'Get a map of all interactive elements (buttons, links, inputs, selects, textareas) with their bounding rectangles, text labels, and types. This gives the AI (especially multimodal models) a complete picture of what can be clicked/typed on the page. Returns an array of { tag, type, text, selector, bounds: {x, y, width, height} }.',
+    parameters: {
+      viewport_only: { type: 'boolean', description: 'Only include elements currently visible in viewport (default: true)' },
+    },
+  },
+  {
+    name: 'visual_query',
+    description: 'Take a screenshot and send it along with a question to the multimodal AI model. The model will analyze the image and answer. Use for: reading text in images/canvas, identifying UI elements visually, solving captchas, checking visual layout, finding elements that cannot be identified by DOM alone. The screenshot is automatically included as an image in the next AI turn.',
+    parameters: {
+      question: { type: 'string', description: 'What to ask about the screenshot (e.g. "What text is in the captcha image?", "Where is the login button?", "What color is the header?")' },
+      selector: { type: 'string', description: 'Optionally scope the screenshot to a specific element (e.g. a captcha image). If omitted, captures the full visible page.' },
+    },
+    required: ['question'],
+  },
+
   // --- Script management tools ---
   {
     name: 'save_script',

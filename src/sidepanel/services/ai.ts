@@ -29,6 +29,7 @@ export async function callAIWithTools(
   executeTool: (call: ToolCall) => Promise<ToolResult>,
   onEvent: OnEvent,
   maxIterations: number = 10,
+  signal?: AbortSignal,
 ): Promise<string> {
   const config = await getAIConfig();
   if (!config || !config.apiKey) {
@@ -40,14 +41,15 @@ export async function callAIWithTools(
   let iterations = 0;
 
   while (iterations < maxIterations) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     iterations++;
 
     let response: { text: string; toolCalls: ToolCall[] };
 
     if (config.type === 'anthropic') {
-      response = await callAnthropicWithTools(config, systemPrompt, conversationMessages);
+      response = await callAnthropicWithTools(config, systemPrompt, conversationMessages, signal);
     } else {
-      response = await callOpenAIWithTools(config, systemPrompt, conversationMessages);
+      response = await callOpenAIWithTools(config, systemPrompt, conversationMessages, signal);
     }
 
     // Emit any text
@@ -94,6 +96,7 @@ async function callAnthropicWithTools(
   config: AIProviderConfig,
   systemPrompt: string,
   messages: AIMessage[],
+  signal?: AbortSignal,
 ): Promise<{ text: string; toolCalls: ToolCall[] }> {
   const url = `${config.baseUrl.replace(/\/$/, '')}/v1/messages`;
 
@@ -118,11 +121,12 @@ async function callAnthropicWithTools(
       'anthropic-dangerous-direct-browser-access': 'true',
     },
     body: JSON.stringify(body),
+    signal,
   });
 
   if (!resp.ok) {
     const errorText = await resp.text();
-    throw new Error(`Anthropic API error (${resp.status}): ${errorText}`);
+    throw new Error(classifyApiError('Anthropic', resp.status, errorText));
   }
 
   const data = await resp.json();
@@ -167,11 +171,28 @@ function buildAnthropicMessages(messages: AIMessage[]): any[] {
       result.push({ role: 'assistant', content });
     } else if (msg.role === 'tool_result') {
       if (msg.toolResults && msg.toolCalls) {
-        const content = msg.toolResults.map((tr, i) => ({
-          type: 'tool_result',
-          tool_use_id: msg.toolCalls![i]?.id || tr.toolCallId || `unknown_${i}`,
-          content: JSON.stringify(tr.result).slice(0, 4000),
-        }));
+        const content = msg.toolResults.map((tr, i) => {
+          const toolUseId = msg.toolCalls![i]?.id || tr.toolCallId || `unknown_${i}`;
+          const imgUrl = extractImageDataUrl(tr.result);
+          if (imgUrl) {
+            // Multimodal: include image in tool_result content array
+            const base64 = imgUrl.replace(/^data:image\/\w+;base64,/, '');
+            const mediaType = imgUrl.match(/^data:(image\/\w+);/)?.[1] || 'image/png';
+            return {
+              type: 'tool_result',
+              tool_use_id: toolUseId,
+              content: [
+                { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+                { type: 'text', text: JSON.stringify(stripImageData(tr.result)).slice(0, 4000) },
+              ],
+            };
+          }
+          return {
+            type: 'tool_result',
+            tool_use_id: toolUseId,
+            content: JSON.stringify(tr.result).slice(0, 4000),
+          };
+        });
         result.push({ role: 'user', content });
       } else if (msg.toolResults) {
         const content = msg.toolResults.map((tr, i) => ({
@@ -192,6 +213,7 @@ async function callOpenAIWithTools(
   config: AIProviderConfig,
   systemPrompt: string,
   messages: AIMessage[],
+  signal?: AbortSignal,
 ): Promise<{ text: string; toolCalls: ToolCall[] }> {
   const url = `${config.baseUrl.replace(/\/$/, '')}/chat/completions`;
 
@@ -213,11 +235,12 @@ async function callOpenAIWithTools(
       Authorization: `Bearer ${config.apiKey}`,
     },
     body: JSON.stringify(body),
+    signal,
   });
 
   if (!resp.ok) {
     const errorText = await resp.text();
-    throw new Error(`OpenAI API error (${resp.status}): ${errorText}`);
+    throw new Error(classifyApiError('OpenAI', resp.status, errorText));
   }
 
   const data = await resp.json();
@@ -259,27 +282,74 @@ function buildOpenAIMessages(systemPrompt: string, messages: AIMessage[]): any[]
       }
       result.push(m);
     } else if (msg.role === 'tool_result') {
-      if (msg.toolResults && msg.toolCalls) {
-        for (let i = 0; i < msg.toolResults.length; i++) {
-          const tr = msg.toolResults[i];
-          result.push({
-            role: 'tool',
-            tool_call_id: msg.toolCalls[i]?.id || tr.toolCallId || `unknown_${i}`,
-            content: JSON.stringify(tr.result).slice(0, 4000),
-          });
-        }
-      } else if (msg.toolResults) {
-        for (let i = 0; i < msg.toolResults.length; i++) {
-          const tr = msg.toolResults[i];
-          result.push({
-            role: 'tool',
-            tool_call_id: tr.toolCallId || `unknown_${i}`,
-            content: JSON.stringify(tr.result).slice(0, 4000),
-          });
-        }
+      const toolResults = msg.toolResults || [];
+      const toolCalls = msg.toolCalls || [];
+      const pendingImages: string[] = [];
+
+      for (let i = 0; i < toolResults.length; i++) {
+        const tr = toolResults[i];
+        const imgUrl = extractImageDataUrl(tr.result);
+        if (imgUrl) pendingImages.push(imgUrl);
+        result.push({
+          role: 'tool',
+          tool_call_id: toolCalls[i]?.id || tr.toolCallId || `unknown_${i}`,
+          content: JSON.stringify(stripImageData(tr.result)).slice(0, 4000),
+        });
+      }
+
+      // OpenAI: tool role can't carry images, so inject as a follow-up user message
+      if (pendingImages.length > 0) {
+        const imageContent: any[] = pendingImages.map(url => ({
+          type: 'image_url',
+          image_url: { url, detail: 'high' },
+        }));
+        imageContent.push({ type: 'text', text: 'Above is the screenshot from the tool result. Analyze it to answer the query.' });
+        result.push({ role: 'user', content: imageContent });
       }
     }
   }
 
   return result;
+}
+
+function classifyApiError(provider: string, status: number, body: string): string {
+  const short = body.slice(0, 200);
+  if (status === 401) return `Invalid API key. Check your ${provider} key in Settings.`;
+  if (status === 403) return `Access denied by ${provider}. Your key may lack permissions.`;
+  if (status === 429) return `Rate limited by ${provider}. Wait a moment and try again.`;
+  if (status === 404) return `Model not found. Check the model name in Settings.`;
+  if (status === 400 && /context.*length|too.*long|token/i.test(body)) return `Conversation too long for this model. Start a new chat or use a model with more context.`;
+  if (status === 400) return `${provider} rejected the request: ${short}`;
+  if (status === 500 || status === 502 || status === 503) return `${provider} server error (${status}). Try again later.`;
+  return `${provider} error (${status}): ${short}`;
+}
+
+// ---- Multimodal helpers ----
+
+/** Extract __imageDataUrl from a tool result (nested in result or at top level) */
+function extractImageDataUrl(result: unknown): string | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const r = result as any;
+  // Direct field
+  if (r.__imageDataUrl) return r.__imageDataUrl;
+  // Nested in .result (from INJECT_JS wrapper)
+  if (r.result?.__imageDataUrl) return r.result.__imageDataUrl;
+  // dataUrl field from screenshot tools
+  if (r.dataUrl && typeof r.dataUrl === 'string' && r.dataUrl.startsWith('data:image/')) return r.dataUrl;
+  if (r.result?.dataUrl && typeof r.result.dataUrl === 'string' && r.result.dataUrl.startsWith('data:image/')) return r.result.dataUrl;
+  return undefined;
+}
+
+/** Strip large base64 image data from result before serializing to JSON text */
+function stripImageData(result: unknown): unknown {
+  if (!result || typeof result !== 'object') return result;
+  const r = { ...(result as any) };
+  if (r.__imageDataUrl) { r.__imageDataUrl = '[image included above]'; }
+  if (r.dataUrl && typeof r.dataUrl === 'string' && r.dataUrl.startsWith('data:image/')) {
+    r.dataUrl = `[image:${r.dataUrl.length} bytes]`;
+  }
+  if (r.result && typeof r.result === 'object') {
+    r.result = stripImageData(r.result);
+  }
+  return r;
 }
