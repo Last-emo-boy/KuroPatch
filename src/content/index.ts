@@ -569,7 +569,7 @@ function onHookMessage(e: MessageEvent) {
 const BG_DIRECT_TYPES = new Set([
   'INJECT_JS', 'SCREENSHOT', 'REMOVE_CSS', 'HIGHLIGHT_ELEMENT',
   'GET_NETWORK_REQUESTS', 'GET_HOOK_EVENTS', 'GET_HOOK_SUMMARY',
-  'GET_PAGE_CONTEXT',
+  'GET_PAGE_CONTEXT', 'ENABLE_STEALTH', 'DISABLE_STEALTH',
 ]);
 
 chrome.runtime.onMessage.addListener((msg: Message, _sender, sendResponse) => {

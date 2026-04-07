@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { AIProviderConfig, AIProviderType } from '../../shared/types';
-import { getAIConfig, setAIConfig, getDebugMode, setDebugMode } from '../../shared/storage';
+import { getAIConfig, setAIConfig, getDebugMode, setDebugMode, getCustomPrompt, setCustomPrompt, getStealthMode, setStealthMode } from '../../shared/storage';
 
 const PROVIDER_PRESETS: Record<AIProviderType, { baseUrl: string; models: string[] }> = {
   anthropic: {
@@ -27,12 +27,17 @@ export default function Settings() {
   const [saved, setSaved] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [debug, setDebug] = useState(false);
+  const [stealth, setStealth] = useState(false);
+  const [customPrompt, setCustomPromptState] = useState('');
+  const [promptSaved, setPromptSaved] = useState(false);
 
   useEffect(() => {
     getAIConfig().then((c) => {
       if (c) setConfig(c);
     });
     getDebugMode().then(setDebug);
+    getStealthMode().then(setStealth);
+    getCustomPrompt().then(setCustomPromptState);
   }, []);
 
   const handleProviderChange = (type: AIProviderType) => {
@@ -182,6 +187,49 @@ export default function Settings() {
         </div>
         <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
           When enabled, all messages between sidepanel ↔ background ↔ content script are logged to the browser console (F12). Check the Service Worker console for background logs.
+        </p>
+      </div>
+
+      <div style={{ marginTop: 20 }}>
+        <h3 style={{ marginBottom: 12 }}>🥷 Stealth Mode</h3>
+        <div className="toggle">
+          <span style={{ fontSize: 13 }}>Anti-Detection</span>
+          <div
+            className={`toggle-switch${stealth ? ' on' : ''}`}
+            onClick={() => {
+              const next = !stealth;
+              setStealth(next);
+              setStealthMode(next);
+              // Also send message to background to apply immediately
+              chrome.runtime.sendMessage({ type: next ? 'ENABLE_STEALTH' : 'DISABLE_STEALTH' });
+            }}
+          />
+        </div>
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+          Neutralizes anti-debugging detection: strips debugger traps, spoofs DevTools detection, hides automation flags, protects native function toString. Disables chrome.debugger to remove the yellow "debugging" banner. Recommended when interacting with CAPTCHAs or anti-bot protected sites.
+        </p>
+      </div>
+
+      <div style={{ marginTop: 20 }}>
+        <h3 style={{ marginBottom: 12 }}>Custom Instructions</h3>
+        <div className="form-group">
+          <label>Additional System Prompt</label>
+          <textarea
+            value={customPrompt}
+            onChange={(e) => setCustomPromptState(e.target.value)}
+            placeholder="Add custom instructions for the AI... (e.g. &quot;Always respond in Chinese&quot;, &quot;Focus on accessibility&quot;, &quot;Be more verbose&quot;)"
+            rows={4}
+            style={{ resize: 'vertical', minHeight: 80 }}
+          />
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button className="btn" onClick={async () => { await setCustomPrompt(customPrompt); setPromptSaved(true); setTimeout(() => setPromptSaved(false), 2000); }}>
+            Save Instructions
+          </button>
+          {promptSaved && <span style={{ color: 'var(--success)', fontSize: 12 }}>✓ Saved</span>}
+        </div>
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+          These instructions are appended to the AI system prompt in every conversation. Use this to customize AI behavior.
         </p>
       </div>
     </div>

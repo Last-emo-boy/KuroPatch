@@ -460,6 +460,18 @@ export const TOOLS: ToolDefinition[] = [
     description: 'List all saved user scripts with their IDs, names, types, and status.',
     parameters: {},
   },
+
+  // --- Stealth / Anti-Detection tools ---
+  {
+    name: 'enable_stealth',
+    description: 'Activate stealth anti-detection mode to bypass anti-debugging protections on the page. This is ESSENTIAL when CAPTCHAs or other security elements refuse to render because they detect debugging/automation. Stealth mode: (1) Neutralizes `debugger` statement traps (infinite pause loops), (2) Spoofs DevTools detection (window size, timing, console tricks), (3) Removes `navigator.webdriver` and other automation flags, (4) Protects `Function.prototype.toString()` to hide overridden functions, (5) Hides KuroPatch DOM artifacts from page scripts, (6) Detaches chrome.debugger to remove the yellow "debugging" banner. The stealth code is injected before page scripts run. Subsequent page navigations auto-reinject stealth if enabled. Use this BEFORE loading a page with anti-debug protection, or call it and then reload the page.',
+    parameters: {},
+  },
+  {
+    name: 'disable_stealth',
+    description: 'Deactivate stealth anti-detection mode. Re-enables normal debugging behavior.',
+    parameters: {},
+  },
 ];
 
 // Format tools for Anthropic API

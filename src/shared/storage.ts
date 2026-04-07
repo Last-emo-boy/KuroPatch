@@ -12,6 +12,8 @@ const KEYS = {
   SESSIONS: 'kp_sessions',
   CURRENT_SESSION: 'kp_current_session',
   SCRIPTS: 'kp_scripts',
+  CUSTOM_PROMPT: 'kp_custom_prompt',
+  STEALTH_MODE: 'kp_stealth_mode',
 } as const;
 
 export async function getDebugMode(): Promise<boolean> {
@@ -222,4 +224,24 @@ export async function getActiveChatSessionId(): Promise<string | null> {
 
 export async function setActiveChatSessionId(id: string | null): Promise<void> {
   await chrome.storage.local.set({ [CHAT_ACTIVE_KEY]: id });
+}
+
+// --- Custom Prompt ---
+export async function getCustomPrompt(): Promise<string> {
+  const result = await chrome.storage.local.get(KEYS.CUSTOM_PROMPT);
+  return result[KEYS.CUSTOM_PROMPT] ?? '';
+}
+
+export async function setCustomPrompt(prompt: string): Promise<void> {
+  await chrome.storage.local.set({ [KEYS.CUSTOM_PROMPT]: prompt });
+}
+
+// --- Stealth Mode ---
+export async function getStealthMode(): Promise<boolean> {
+  const result = await chrome.storage.local.get(KEYS.STEALTH_MODE);
+  return result[KEYS.STEALTH_MODE] ?? false;
+}
+
+export async function setStealthMode(enabled: boolean): Promise<void> {
+  await chrome.storage.local.set({ [KEYS.STEALTH_MODE]: enabled });
 }

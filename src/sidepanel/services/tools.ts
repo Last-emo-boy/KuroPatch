@@ -55,6 +55,8 @@ const TOOL_ICONS: Record<string, string> = {
   type_at_coords: '⌨️',
   get_interactive_map: '🗺️',
   visual_query: '👁️',
+  enable_stealth: '🥷',
+  disable_stealth: '🔓',
 };
 
 export function getToolIcon(name: string): string {
@@ -992,6 +994,14 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
         break;
       }
 
+      case 'enable_stealth':
+        result = await sendToBackground('ENABLE_STEALTH');
+        break;
+
+      case 'disable_stealth':
+        result = await sendToBackground('DISABLE_STEALTH');
+        break;
+
       default:
         return {
           tool: name,
@@ -1188,6 +1198,10 @@ function formatSuccessResult(name: string, args: Record<string, unknown>, result
     }
     case 'visual_query':
       return `Visual query: "${(args.question as string).slice(0, 50)}"`;
+    case 'enable_stealth':
+      return `Stealth mode enabled — anti-detection active`;
+    case 'disable_stealth':
+      return `Stealth mode disabled`;
     default:
       return `Done`;
   }

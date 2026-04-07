@@ -5,7 +5,7 @@ import type { ChatSession, ChatSessionItem, ChatSessionAIMsg } from '../../share
 import { callAIWithTools, type AIMessage, type AIStreamEvent } from '../services/ai';
 import { executeTool, getToolIcon, getToolDisplayName } from '../services/tools';
 import { getPageContext } from '../services/page';
-import { getChatSessions, saveChatSession, deleteChatSession, getActiveChatSessionId, setActiveChatSessionId } from '../../shared/storage';
+import { getChatSessions, saveChatSession, deleteChatSession, getActiveChatSessionId, setActiveChatSessionId, getCustomPrompt } from '../../shared/storage';
 
 // Configure marked for safe rendering
 marked.setOptions({ breaks: true, gfm: true });
@@ -15,6 +15,46 @@ interface ChatItem extends ChatSessionItem {}
 
 function newSessionId(): string {
   return `chat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+}
+
+/** Format a timestamp as relative time ("2m ago", "3h ago", "yesterday", etc.) */
+function relativeTime(ts: number): string {
+  const diff = Date.now() - ts;
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day === 1) return 'yesterday';
+  if (day < 30) return `${day}d ago`;
+  return new Date(ts).toLocaleDateString();
+}
+
+/** Export chat items as a markdown string */
+function exportChatAsMarkdown(items: ChatItem[], sessionName: string): string {
+  const lines: string[] = [`# ${sessionName}`, `_Exported ${new Date().toLocaleString()}_`, ''];
+  for (const item of items) {
+    switch (item.type) {
+      case 'user':
+        lines.push(`**You:** ${item.content}`, '');
+        break;
+      case 'text':
+        lines.push(`**AI:** ${item.content}`, '');
+        break;
+      case 'tool_call':
+        lines.push(`> 🔧 **${getToolDisplayName(item.toolCall!.name)}** — ${Object.entries(item.toolCall!.args).map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`).join(', ')}`, '');
+        break;
+      case 'tool_result':
+        lines.push(`> ${item.toolResult!.success ? '✓' : '✗'} ${item.toolResult!.displayText}`, '');
+        break;
+      case 'error':
+        lines.push(`> ⚠ Error: ${item.content}`, '');
+        break;
+    }
+  }
+  return lines.join('\n');
 }
 
 export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { onOpenSettings?: () => void; onOpenScripts?: () => void; onOpenPanel?: (panel: string) => void }) {
@@ -32,6 +72,9 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const [lastFailedInput, setLastFailedInput] = useState<string | null>(null);
+  const [sessionSearch, setSessionSearch] = useState('');
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
 
   // ---- Persistence helpers ----
   const persistSession = useCallback(async (id: string, newItems: ChatItem[], newAiMsgs: AIMessage[]) => {
@@ -117,6 +160,32 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
     }
   }, [activeId, switchToSession]);
 
+  // ---- Rename session ----
+  const renameSession = useCallback(async (id: string, newName: string) => {
+    const all = await getChatSessions();
+    const session = all.find(s => s.id === id);
+    if (session && newName.trim()) {
+      session.name = newName.trim();
+      await saveChatSession(session);
+      const updated = await getChatSessions();
+      setSessions(updated);
+    }
+    setRenamingId(null);
+  }, []);
+
+  // ---- Export current chat as markdown ----
+  const exportChat = useCallback(() => {
+    const name = sessions.find(s => s.id === activeId)?.name || 'chat';
+    const md = exportChatAsMarkdown(items, name);
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${name.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_')}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [activeId, items, sessions]);
+
   // Listen for ELEMENT_SELECTED from content script
   useEffect(() => {
     const listener = (msg: any) => {
@@ -154,6 +223,42 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
     const text = (overrideText || input).trim();
     if (!text || loading) return;
 
+    // ---- Slash commands ----
+    if (text.startsWith('/')) {
+      const cmd = text.toLowerCase();
+      if (cmd === '/clear') {
+        setInput('');
+        await clearChat();
+        return;
+      }
+      if (cmd === '/export') {
+        setInput('');
+        exportChat();
+        return;
+      }
+      if (cmd === '/new') {
+        setInput('');
+        await createNewSession();
+        return;
+      }
+      if (cmd === '/sessions') {
+        setInput('');
+        setShowSessions(true);
+        return;
+      }
+      if (cmd === '/help') {
+        setInput('');
+        const helpItem: ChatItem = {
+          id: `t_${Date.now()}`,
+          type: 'text',
+          content: `**Available Slash Commands:**\n- \`/clear\` — Clear current chat\n- \`/export\` — Export chat as Markdown file\n- \`/new\` — Start a new session\n- \`/sessions\` — Open session drawer\n- \`/help\` — Show this help\n\n**Keyboard Shortcuts:**\n- \`Ctrl+K\` — Focus chat input\n- \`Ctrl+N\` — New session\n- \`Ctrl+E\` — Export chat\n- \`Enter\` — Send message\n- \`Shift+Enter\` — New line`,
+          timestamp: Date.now(),
+        };
+        setItems([...items, helpItem]);
+        return;
+      }
+    }
+
     // Ensure we have an active session ID
     let sessionId = activeId;
     if (!sessionId) {
@@ -184,7 +289,8 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
 
     try {
       const context = await getPageContext();
-      const systemPrompt = buildSystemPrompt(context, pickedElement);
+      const customPrompt = await getCustomPrompt();
+      const systemPrompt = buildSystemPrompt(context, pickedElement, customPrompt);
 
       let userContent = text;
       if (pickedElement) {
@@ -302,6 +408,19 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
     }
   };
 
+  // ---- Global keyboard shortcuts ----
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === 'k') { e.preventDefault(); inputRef.current?.focus(); }
+        else if (e.key === 'n') { e.preventDefault(); createNewSession(); }
+        else if (e.key === 'e') { e.preventDefault(); exportChat(); }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [createNewSession, exportChat]);
+
   const clearChat = async () => {
     setItems([]);
     setAiMessages([]);
@@ -321,7 +440,10 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
           <span className="session-chevron">{showSessions ? '▲' : '▼'}</span>
         </button>
         <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-          <button className="chat-header-btn" onClick={createNewSession} title="New chat">+</button>
+          {items.length > 0 && (
+            <button className="chat-header-btn" onClick={exportChat} title="Export chat as Markdown">⬇</button>
+          )}
+          <button className="chat-header-btn" onClick={createNewSession} title="New chat (Ctrl+N)">+</button>
           {onOpenSettings && (
             <button className="chat-header-btn" onClick={onOpenSettings} title="Settings">⚙</button>
           )}
@@ -348,14 +470,37 @@ export default function Chat({ onOpenSettings, onOpenScripts, onOpenPanel }: { o
             <span style={{ fontWeight: 600, fontSize: 12 }}>Conversations</span>
             <button className="btn" onClick={createNewSession} style={{ padding: '3px 8px', fontSize: 10 }}>+ New</button>
           </div>
+          <div style={{ padding: '6px 10px' }}>
+            <input
+              className="session-search-input"
+              type="text"
+              value={sessionSearch}
+              onChange={e => setSessionSearch(e.target.value)}
+              placeholder="Search conversations..."
+            />
+          </div>
           <div className="session-list">
             {sessions.length === 0 ? (
               <div style={{ padding: 12, color: 'var(--text-dim)', fontSize: 11, textAlign: 'center' }}>No saved conversations</div>
-            ) : sessions.map((s) => (
+            ) : sessions
+              .filter(s => !sessionSearch || s.name.toLowerCase().includes(sessionSearch.toLowerCase()))
+              .map((s) => (
               <div key={s.id} className={`session-item${s.id === activeId ? ' active' : ''}`} onClick={() => switchToSession(s.id)}>
-                <div className="session-item-name">{s.name}</div>
+                {renamingId === s.id ? (
+                  <input
+                    className="session-rename-input"
+                    autoFocus
+                    value={renameValue}
+                    onChange={e => setRenameValue(e.target.value)}
+                    onBlur={() => renameSession(s.id, renameValue)}
+                    onKeyDown={e => { if (e.key === 'Enter') renameSession(s.id, renameValue); if (e.key === 'Escape') setRenamingId(null); }}
+                    onClick={e => e.stopPropagation()}
+                  />
+                ) : (
+                  <div className="session-item-name" onDoubleClick={(e) => { e.stopPropagation(); setRenamingId(s.id); setRenameValue(s.name); }} title="Double-click to rename">{s.name}</div>
+                )}
                 <div className="session-item-meta">
-                  {s.items.length} messages · {new Date(s.updatedAt).toLocaleDateString()}
+                  {s.items.length} messages · {relativeTime(s.updatedAt)}
                 </div>
                 <button className="session-delete" onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }} title="Delete">×</button>
               </div>
@@ -466,6 +611,7 @@ function HintChip({ text, onClick }: { text: string; onClick: (text: string) => 
 
 function ChatItemView({ item, onRetry }: { item: ChatItem; onRetry?: () => void }) {
   const [copied, setCopied] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
 
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text).then(() => {
@@ -490,7 +636,7 @@ function ChatItemView({ item, onRetry }: { item: ChatItem; onRetry?: () => void 
             dangerouslySetInnerHTML={{ __html: renderMarkdown(item.content) }}
           />
           <button
-            className="bubble-copy-btn"
+            className={`bubble-copy-btn${copied ? ' copied' : ''}`}
             onClick={() => handleCopy(item.content)}
             title="Copy"
           >
@@ -499,31 +645,39 @@ function ChatItemView({ item, onRetry }: { item: ChatItem; onRetry?: () => void 
         </div>
       );
 
-    case 'tool_call':
+    case 'tool_call': {
+      const argEntries = Object.entries(item.toolCall!.args);
+      const hasLongArgs = argEntries.some(([, v]) => String(v).length > 80);
       return (
         <div className="action-card">
-          <div className="action-header">
+          <div className="action-header" onClick={() => hasLongArgs && setCollapsed(!collapsed)} style={hasLongArgs ? { cursor: 'pointer' } : undefined}>
             <span className="action-icon">{getToolIcon(item.toolCall!.name)}</span>
             <span className="action-name">{getToolDisplayName(item.toolCall!.name)}</span>
+            {hasLongArgs && <span className="collapse-indicator">{collapsed ? '▸' : '▾'}</span>}
           </div>
           <div className="action-args">
-            {Object.entries(item.toolCall!.args).map(([k, v]) => (
+            {argEntries.map(([k, v]) => (
               <div key={k} className="arg-line">
                 <span className="arg-key">{k}:</span>
-                <span className="arg-value">{String(v).slice(0, 120)}</span>
+                <span className="arg-value">{collapsed && hasLongArgs ? String(v).slice(0, 60) + (String(v).length > 60 ? '…' : '') : String(v).slice(0, 500)}</span>
               </div>
             ))}
           </div>
         </div>
       );
+    }
 
     case 'tool_result': {
       const tr = item.toolResult!;
       const imgUrl = extractToolResultImage(tr.result);
+      const isLong = tr.displayText.length > 100;
       return (
         <div className={`action-result ${tr.success ? 'success' : 'fail'}`}>
-          <span className="result-icon">{tr.success ? '✓' : '✗'}</span>
-          <span className="result-text">{tr.displayText}</span>
+          <div className="result-main" onClick={() => isLong && setCollapsed(!collapsed)} style={isLong ? { cursor: 'pointer' } : undefined}>
+            <span className="result-icon">{tr.success ? '✓' : '✗'}</span>
+            <span className="result-text">{collapsed && isLong ? tr.displayText.slice(0, 100) + '…' : tr.displayText}</span>
+            {isLong && <span className="collapse-indicator">{collapsed ? '▸' : '▾'}</span>}
+          </div>
           {imgUrl && (
             <div className="result-image">
               <img
@@ -540,7 +694,7 @@ function ChatItemView({ item, onRetry }: { item: ChatItem; onRetry?: () => void 
 
     case 'error':
       return (
-        <div className="chat-bubble error-bubble">
+        <div className="chat-bubble error-bubble" role="alert">
           <span className="error-icon">⚠</span>
           <span>{item.content}</span>
           {onRetry && (
@@ -575,7 +729,7 @@ function extractToolResultImage(result: unknown): string | undefined {
   return undefined;
 }
 
-function buildSystemPrompt(context: any, pickedElement?: any): string {
+function buildSystemPrompt(context: any, pickedElement?: any, customPrompt?: string): string {
   // ---- Dynamic context blocks ----
   let pickedBlock = '';
   if (pickedElement) {
@@ -727,6 +881,17 @@ These tools enable vision-based page interaction. When using a multimodal model 
 2. The AI model sees the image and identifies coordinates/text
 3. \`click_at_coords\` / \`type_at_coords\` — act on the coordinates
 4. Verify with another screenshot or DOM check
+### 🥷 Stealth & Anti-Detection
+- \`enable_stealth\` — Activate comprehensive anti-detection stealth mode. Use when CAPTCHAs or anti-bot systems detect the extension. Protections: neutralizes debugger traps, spoofs DevTools detection, removes automation flags (navigator.webdriver), hides extension DOM artifacts, protects Function.prototype.toString. Also detaches chrome.debugger to remove the yellow "debugging" banner.
+- \`disable_stealth\` — Deactivate stealth mode. A page reload is recommended after disabling.
+
+**When to use stealth:**
+- CAPTCHAs fail to render or behave differently
+- Sites show "debugging detected" or block functionality
+- Anti-bot systems interfere with automation
+- Before interacting with security-sensitive pages
+
+**Note:** When stealth mode is on, \`get_network_requests\` uses hook-based monitoring instead of chrome.debugger (which is highly detectable). Stealth injection runs early on every page navigation to beat anti-debug scripts.
 ### �💾 Script Persistence (IMPORTANT)
 - \`save_script\` — Save a reusable JS/CSS script for the user to run again later
 - \`update_script\` — Update an existing saved script (iterate on code, fix bugs)
@@ -770,5 +935,5 @@ ${pickedBlock}
 
 ### DOM Summary
 ${context?.domSummary || 'Not available'}
-${sectionsBlock}${consoleBlock}${errorsBlock}`;
+${sectionsBlock}${consoleBlock}${errorsBlock}${customPrompt ? `\n\n## Custom Instructions\n${customPrompt}` : ''}`;
 }

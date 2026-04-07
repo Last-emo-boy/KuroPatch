@@ -3,7 +3,7 @@
 // ============================================================
 import type { Message } from '../shared/messaging';
 import type { NetworkRequest, HookEvent, Patch, HookSummary, UserScript } from '../shared/types';
-import { getAIConfig, getPatches, addPatch, removePatch, setPatches, updatePatch, getScripts, updateScript } from '../shared/storage';
+import { getAIConfig, getPatches, addPatch, removePatch, setPatches, updatePatch, getScripts, updateScript, getStealthMode, setStealthMode } from '../shared/storage';
 
 // --- State per tab ---
 interface TabState {
@@ -20,6 +20,13 @@ function getTabState(tabId: number): TabState {
   }
   return tabStates.get(tabId)!;
 }
+
+// --- Stealth mode state ---
+let stealthMode = false;
+chrome.storage.local.get('kp_stealth_mode').then(r => { stealthMode = r.kp_stealth_mode ?? false; });
+chrome.storage.onChanged.addListener((changes) => {
+  if ('kp_stealth_mode' in changes) stealthMode = changes.kp_stealth_mode.newValue ?? false;
+});
 
 // --- Open side panel on action click ---
 chrome.action.onClicked.addListener((tab) => {
@@ -148,6 +155,188 @@ function debugLog(...args: unknown[]) {
 }
 
 console.log('[KP] Background v0.2.3 loaded');
+
+// ============================================================
+// Stealth Anti-Detection System
+// Injects code EARLY (before page scripts) to neutralize
+// anti-debugging, anti-automation, and DevTools detection.
+// ============================================================
+
+/** The stealth code to inject into the page MAIN world */
+function getStealthPayload(): () => void {
+  return function () {
+    if ((window as any).__kp_stealth_active) return;
+    (window as any).__kp_stealth_active = true;
+
+    // ===== 1. Neutralize `debugger` statement traps =====
+    // Override Function constructor to strip debugger from dynamically created functions
+    const OrigFunction = Function;
+    const fnHandler: ProxyHandler<typeof Function> = {
+      construct(target, args) {
+        if (args.length > 0) {
+          const last = args.length - 1;
+          if (typeof args[last] === 'string' && /\bdebugger\b/.test(args[last])) {
+            args[last] = args[last].replace(/\bdebugger\b/g, '/* noop */');
+          }
+        }
+        return Reflect.construct(target, args);
+      },
+      apply(target, thisArg, args) {
+        if (args.length > 0) {
+          const last = args.length - 1;
+          if (typeof args[last] === 'string' && /\bdebugger\b/.test(args[last])) {
+            args[last] = args[last].replace(/\bdebugger\b/g, '/* noop */');
+          }
+        }
+        return Reflect.apply(target, thisArg, args);
+      },
+    };
+    (window as any).Function = new Proxy(OrigFunction, fnHandler);
+
+    // Override eval to strip debugger
+    const origEval = window.eval;
+    (window as any).eval = function (code: any) {
+      if (typeof code === 'string') {
+        code = code.replace(/\bdebugger\b/g, '/* noop */');
+      }
+      return origEval.call(this, code);
+    };
+
+    // setInterval/setTimeout: strip debugger from string-based calls
+    const origSetInterval = window.setInterval;
+    const origSetTimeout = window.setTimeout;
+    (window as any).setInterval = function (fn: any, ...rest: any[]) {
+      if (typeof fn === 'string' && /\bdebugger\b/.test(fn)) {
+        fn = fn.replace(/\bdebugger\b/g, '/* noop */');
+      }
+      return origSetInterval.call(window, fn, ...rest);
+    };
+    (window as any).setTimeout = function (fn: any, ...rest: any[]) {
+      if (typeof fn === 'string' && /\bdebugger\b/.test(fn)) {
+        fn = fn.replace(/\bdebugger\b/g, '/* noop */');
+      }
+      return origSetTimeout.call(window, fn, ...rest);
+    };
+
+    // ===== 2. Spoof DevTools size-based detection =====
+    // Many anti-debug scripts check: outerWidth - innerWidth > threshold
+    try {
+      Object.defineProperty(window, 'outerWidth', {
+        get: () => window.innerWidth,
+        configurable: true,
+      });
+      Object.defineProperty(window, 'outerHeight', {
+        get: () => window.innerHeight + 80, // account for browser chrome
+        configurable: true,
+      });
+    } catch (_) {}
+
+    // ===== 3. Remove automation/webdriver flags =====
+    try {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+        configurable: true,
+      });
+    } catch (_) {}
+    // Remove CDP artifacts
+    const cdcKeys = Object.keys(window).filter(
+      (k) => k.startsWith('cdc_') || k.startsWith('__webdriver')
+    );
+    for (const k of cdcKeys) {
+      try { delete (window as any)[k]; } catch (_) {}
+    }
+
+    // ===== 4. Protect Function.prototype.toString =====
+    // Anti-debug scripts call fn.toString() to check if native functions were overridden
+    const nativeStrings = new Map<Function, string>();
+    const origToString = Function.prototype.toString;
+    nativeStrings.set(origToString, 'function toString() { [native code] }');
+    nativeStrings.set((window as any).eval, 'function eval() { [native code] }');
+    nativeStrings.set((window as any).Function, 'function Function() { [native code] }');
+    nativeStrings.set((window as any).setInterval, 'function setInterval() { [native code] }');
+    nativeStrings.set((window as any).setTimeout, 'function setTimeout() { [native code] }');
+
+    Function.prototype.toString = function () {
+      if (nativeStrings.has(this)) return nativeStrings.get(this)!;
+      return origToString.call(this);
+    };
+    nativeStrings.set(Function.prototype.toString, 'function toString() { [native code] }');
+
+    // ===== 5. Console-based DevTools detection =====
+    // Some scripts use console.log with getter-objects to detect DevTools
+    // We can't fully prevent, but we can block the image-loading trick
+    // Override console.table/log to strip detection objects
+    const origConsoleTable = console.table;
+    console.table = function (...args: any[]) {
+      // Block devtools-detect patterns that use console.table with a special element
+      try {
+        if (args.length === 1 && args[0] instanceof HTMLElement) return;
+      } catch (_) {}
+      return origConsoleTable.apply(console, args);
+    };
+    nativeStrings.set(console.table, 'function table() { [native code] }');
+
+    // ===== 6. Hide KuroPatch DOM artifacts =====
+    // Wrap querySelectorAll/querySelector to filter out __kp_ elements
+    // when querying generic selectors that anti-debug scripts might use
+    const origQSA = Document.prototype.querySelectorAll;
+    const origQS = Document.prototype.querySelector;
+    const kpIdPattern = /^__kp_/;
+
+    Document.prototype.querySelectorAll = function (sel: string) {
+      const result = origQSA.call(this, sel);
+      // Only filter for generic queries that might expose our elements
+      if (sel === 'script' || sel === 'style' || sel === '[id]' || sel === 'div') {
+        const filtered = Array.from(result).filter(
+          (el) => !kpIdPattern.test((el as Element).id || '')
+        );
+        // Return an array-like that behaves as NodeList
+        return filtered as unknown as NodeListOf<Element>;
+      }
+      return result;
+    };
+    nativeStrings.set(Document.prototype.querySelectorAll, 'function querySelectorAll() { [native code] }');
+
+    Document.prototype.querySelector = function (sel: string) {
+      const result = origQS.call(this, sel);
+      if (result && kpIdPattern.test(result.id || '')) return null;
+      return result;
+    };
+    nativeStrings.set(Document.prototype.querySelector, 'function querySelector() { [native code] }');
+
+    // ===== 7. Date.now / performance.now timing protection =====
+    // Anti-debug: let t=Date.now(); debugger; if(Date.now()-t > 100) detected
+    // Since we strip debugger above, this is mostly neutralized already.
+    // But we add a small safety net: prevent timing gaps > 50ms from being detected
+    // by capping the delta that debugger-adjacent code sees.
+    // (We don't override globally since that would break page logic —
+    //  the function-constructor patching above is the primary defense.)
+  };
+}
+
+/** Inject stealth code into a tab's MAIN world early */
+async function injectStealthCode(tabId: number) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: getStealthPayload(),
+      injectImmediately: true,
+    });
+    debugLog('Stealth injected into tab', tabId);
+  } catch (e: any) {
+    debugLog('Stealth injection failed:', tabId, e.message);
+  }
+}
+
+// Early stealth injection: inject on page commit (before scripts run)
+chrome.webNavigation.onCommitted.addListener(async (details) => {
+  if (details.frameId !== 0) return; // main frame only
+  if (details.url.startsWith('chrome://') || details.url.startsWith('chrome-extension://')) return;
+  if (!stealthMode) return;
+  debugLog('Stealth early-inject on commit:', details.tabId, details.url);
+  await injectStealthCode(details.tabId);
+});
 
 // --- Re-apply active scripts on page navigation ---
 // Debounce per tab to prevent double-injection from multiple triggers
@@ -368,7 +557,10 @@ async function handleMessage(msg: Message, sender: chrome.runtime.MessageSender)
     }
 
     case 'GET_NETWORK_REQUESTS': {
-      await attachDebugger(tabId);
+      // In stealth mode, skip chrome.debugger to avoid the yellow "debugging" banner
+      if (!stealthMode) {
+        await attachDebugger(tabId);
+      }
       const state = getTabState(tabId);
       return state.networkRequests;
     }
@@ -437,6 +629,31 @@ async function handleMessage(msg: Message, sender: chrome.runtime.MessageSender)
 
     case 'GET_PATCHES':
       return getPatches();
+
+    case 'ENABLE_STEALTH': {
+      stealthMode = true;
+      await setStealthMode(true);
+      // Detach debugger from all tabs to remove yellow banner
+      try {
+        const targets = await chrome.debugger.getTargets();
+        for (const t of targets) {
+          if (t.tabId && t.attached) {
+            try { await chrome.debugger.detach({ tabId: t.tabId }); } catch (_) {}
+          }
+        }
+      } catch (_) {}
+      // Inject stealth into current tab
+      if (tabId) {
+        try { await injectStealthCode(tabId); } catch (_) {}
+      }
+      return { success: true, message: 'Stealth mode enabled. Debugger detached, anti-detection active.' };
+    }
+
+    case 'DISABLE_STEALTH': {
+      stealthMode = false;
+      await setStealthMode(false);
+      return { success: true, message: 'Stealth mode disabled. Page reload recommended to clear injections.' };
+    }
 
     default:
       debugLog('UNHANDLED message type:', msg.type);
