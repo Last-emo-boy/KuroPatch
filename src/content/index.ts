@@ -129,8 +129,8 @@ function getElementInfo(el: Element): ElementInfo {
     attributes[attr.name] = attr.value;
   }
 
-  // Children summary
-  const children = Array.from(el.children).slice(0, 10).map(c => ({
+  // Children summary (increased to 20)
+  const children = Array.from(el.children).slice(0, 20).map(c => ({
     tag: c.tagName.toLowerCase(),
     selector: getSelector(c),
     text: (c.textContent || '').trim().slice(0, 50),
@@ -146,7 +146,60 @@ function getElementInfo(el: Element): ElementInfo {
       }))
     : [];
 
-  return {
+  // Shadow DOM detection
+  const shadowRoot = (el as any).shadowRoot as ShadowRoot | null;
+  const shadowChildren = shadowRoot
+    ? Array.from(shadowRoot.children).slice(0, 15).map(c => ({
+        tag: c.tagName.toLowerCase(),
+        selector: `::shadow > ${c.tagName.toLowerCase()}${c.id ? '#' + c.id : c.className ? '.' + (c.className as string).trim().split(/\s+/)[0] : ''}`,
+        text: (c.textContent || '').trim().slice(0, 50),
+      }))
+    : undefined;
+
+  // Visibility diagnosis
+  const rect = el.getBoundingClientRect();
+  const display = computed.getPropertyValue('display');
+  const visibility = computed.getPropertyValue('visibility');
+  const opacity = parseFloat(computed.getPropertyValue('opacity'));
+  const visibilityReasons: string[] = [];
+
+  if (display === 'none') visibilityReasons.push('display: none');
+  if (visibility === 'hidden') visibilityReasons.push('visibility: hidden');
+  if (opacity === 0) visibilityReasons.push('opacity: 0');
+  if (rect.width === 0 && rect.height === 0) visibilityReasons.push('zero size');
+
+  // Check if clipped by overflow parent
+  let p = el.parentElement;
+  while (p && visibilityReasons.length < 5) {
+    const pRect = p.getBoundingClientRect();
+    const pOverflow = window.getComputedStyle(p).getPropertyValue('overflow');
+    if ((pOverflow === 'hidden' || pOverflow === 'clip') &&
+        (rect.bottom <= pRect.top || rect.top >= pRect.bottom ||
+         rect.right <= pRect.left || rect.left >= pRect.right)) {
+      visibilityReasons.push(`clipped by overflow parent <${p.tagName.toLowerCase()}${p.id ? '#' + p.id : ''}>`);
+      break;
+    }
+    p = p.parentElement;
+  }
+
+  const isInViewport = rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0;
+  if (!isInViewport && rect.width > 0 && rect.height > 0) visibilityReasons.push('outside viewport');
+
+  // Iframe info
+  const isIframe = el.tagName.toLowerCase() === 'iframe';
+  let iframeInfo: Record<string, unknown> | undefined;
+  if (isIframe) {
+    const iframe = el as HTMLIFrameElement;
+    let accessible = false;
+    try { iframe.contentDocument?.documentElement; accessible = true; } catch { accessible = false; }
+    iframeInfo = {
+      src: iframe.src,
+      accessible,
+      sandbox: iframe.getAttribute('sandbox'),
+    };
+  }
+
+  const info: Record<string, unknown> = {
     tagName: el.tagName,
     id: el.id,
     className: el.className.toString(),
@@ -161,6 +214,32 @@ function getElementInfo(el: Element): ElementInfo {
     children,
     siblings,
   };
+
+  // Parent context
+  if (parent) {
+    const parentCs = window.getComputedStyle(parent);
+    info.parent = {
+      tag: parent.tagName.toLowerCase(),
+      selector: getSelector(parent),
+      id: parent.id || undefined,
+      display: parentCs.getPropertyValue('display'),
+      position: parentCs.getPropertyValue('position'),
+      childCount: parent.children.length,
+      summary: (parent.textContent || '').trim().slice(0, 80),
+    };
+  }
+
+  // Conditional extras (only include if present)
+  if (shadowChildren) info.hasShadowRoot = true;
+  if (shadowChildren) info.shadowChildren = shadowChildren;
+  if (visibilityReasons.length > 0) {
+    info.visibility = { isVisible: false, reasons: visibilityReasons };
+  } else {
+    info.visibility = { isVisible: true, isInViewport };
+  }
+  if (iframeInfo) info.iframeInfo = iframeInfo;
+
+  return info as unknown as ElementInfo;
 }
 
 // ---- Page sections detection (v0.2) ----
@@ -322,7 +401,11 @@ function modifyDom(payload: any) {
 
   switch (action) {
     case 'setText': el.textContent = value; break;
-    case 'setAttribute': el.setAttribute(attr, value); break;
+    case 'setAttribute': {
+      el.setAttribute(attr, value);
+      const finalValue = el.getAttribute(attr);
+      return { ok: true, before, after: el.outerHTML.slice(0, 200), attribute: attr, finalValue };
+    }
     case 'removeAttribute': el.removeAttribute(attr); break;
     case 'addClass': el.classList.add(value); break;
     case 'removeClass': el.classList.remove(value); break;
@@ -347,8 +430,9 @@ function modifyStyle(payload: any) {
 
   const before = el.style.getPropertyValue(property);
   el.style.setProperty(property, value);
+  const computedAfter = window.getComputedStyle(el).getPropertyValue(property);
 
-  return { ok: true, before, after: value };
+  return { ok: true, before, after: value, computedAfter };
 }
 
 function injectJs(payload: any) {
@@ -427,12 +511,59 @@ async function executeAutomation(action: AutomationAction): Promise<any> {
     }
     case 'waitForSelector': {
       const timeout = Math.min(action.timeout ?? 5000, 30000);
+      const pollInterval = Math.max(50, Math.min(action.pollInterval ?? 200, 2000));
+      const requireVisible = action.visible ?? false;
+      const condition = action.condition as string | undefined;
       const start = Date.now();
       while (Date.now() - start < timeout) {
-        if (document.querySelector(action.selector)) return { ok: true, found: true };
-        await new Promise(r => setTimeout(r, 200));
+        let met = false;
+        if (condition) {
+          // Evaluate JS condition
+          try { met = !!(new Function(`return (${condition})`)()); } catch { met = false; }
+        } else if (action.selector) {
+          const el = document.querySelector(action.selector);
+          if (el) {
+            if (requireVisible) {
+              const r = el.getBoundingClientRect();
+              const cs = window.getComputedStyle(el);
+              met = r.width > 0 && r.height > 0 &&
+                    cs.display !== 'none' && cs.visibility !== 'hidden' &&
+                    parseFloat(cs.opacity) > 0;
+            } else {
+              met = true;
+            }
+          }
+        }
+        if (met) return { ok: true, found: true, elapsed: Date.now() - start };
+        await new Promise(r => setTimeout(r, pollInterval));
       }
-      return { error: 'Timeout waiting for selector' };
+      // Enhanced failure diagnostics
+      const diag: Record<string, unknown> = { elapsed: Date.now() - start };
+      if (action.selector) {
+        const el = document.querySelector(action.selector);
+        if (el) {
+          diag.selectorFound = true;
+          const r = el.getBoundingClientRect();
+          const cs = window.getComputedStyle(el);
+          diag.isVisible = r.width > 0 && r.height > 0 &&
+            cs.display !== 'none' && cs.visibility !== 'hidden' && parseFloat(cs.opacity) > 0;
+          if (!diag.isVisible) {
+            const reasons: string[] = [];
+            if (cs.display === 'none') reasons.push('display:none');
+            if (cs.visibility === 'hidden') reasons.push('visibility:hidden');
+            if (parseFloat(cs.opacity) === 0) reasons.push('opacity:0');
+            if (r.width === 0 || r.height === 0) reasons.push('zero size');
+            diag.hiddenReasons = reasons;
+          }
+          diag.textContent = (el.textContent || '').trim().slice(0, 100);
+        } else {
+          diag.selectorFound = false;
+        }
+      }
+      if (condition) {
+        try { diag.conditionResult = !!(new Function(`return (${condition})`)()); } catch (e: any) { diag.conditionError = e.message; }
+      }
+      return { error: 'Timeout waiting for condition', ...diag };
     }
     case 'readText': {
       const el = document.querySelector(action.selector);
@@ -606,8 +737,17 @@ chrome.runtime.onMessage.addListener((msg: Message, _sender, sendResponse) => {
       case 'AUTOMATE':
         return executeAutomation(msg.payload as AutomationAction);
       case 'CHECK_EXISTS': {
-        const { selector } = msg.payload as any;
-        return { ok: true, exists: !!document.querySelector(selector) };
+        const { selector, retries = 0, retryDelay = 500 } = msg.payload as any;
+        for (let attempt = 0; attempt <= retries; attempt++) {
+          const matches = document.querySelectorAll(selector);
+          if (matches.length > 0) {
+            return { ok: true, exists: true, count: matches.length, attempts: attempt + 1 };
+          }
+          if (attempt < retries) {
+            await new Promise(r => setTimeout(r, retryDelay));
+          }
+        }
+        return { ok: true, exists: false, count: 0, attempts: retries + 1 };
       }
       case 'CHECK_TEXT': {
         const { selector, text } = msg.payload as any;

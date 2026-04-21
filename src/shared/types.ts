@@ -259,7 +259,7 @@ export type AutomationAction =
   | { type: 'scroll'; x: number; y: number }
   | { type: 'scrollToElement'; selector: string }
   | { type: 'wait'; ms: number }
-  | { type: 'waitForSelector'; selector: string; timeout?: number }
+  | { type: 'waitForSelector'; selector?: string; timeout?: number; visible?: boolean; condition?: string; pollInterval?: number }
   | { type: 'readText'; selector: string }
   | { type: 'keyboard'; key: string; modifiers?: string[] }
   | { type: 'checkExists'; selector: string }

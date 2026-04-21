@@ -16,7 +16,7 @@ const CAT_ICONS: Record<PatchCategory, string> = {
   debug: '🐛',
 };
 
-export default function Patches({ onBack }: { onBack?: () => void }) {
+export default function Patches() {
   const [patches, setPatches] = useState<Patch[]>([]);
   const [catFilter, setCatFilter] = useState<string>('all');
 
@@ -64,7 +64,6 @@ export default function Patches({ onBack }: { onBack?: () => void }) {
     <div style={{ padding: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {onBack && <button className="btn secondary" onClick={onBack} style={{ padding: '4px 10px', fontSize: 11 }}>← Chat</button>}
           <h3>Patches ({patches.length}){enabledCount < patches.length && <span style={{ color: 'var(--text-muted)', fontSize: 11, fontWeight: 400 }}> · {enabledCount} active</span>}</h3>
         </div>
         <div style={{ display: 'flex', gap: 4 }}>

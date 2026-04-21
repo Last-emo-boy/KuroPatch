@@ -47,7 +47,31 @@ export type MessageType =
   | 'SCREENSHOT'
   | 'HIGHLIGHT_ELEMENT'
   // Content → Background (lifecycle)
-  | 'CONTENT_READY';
+  | 'CONTENT_READY'
+  // Stealth
+  | 'ENABLE_STEALTH'
+  | 'DISABLE_STEALTH'
+  // Navigation & Tabs
+  | 'NAVIGATE'
+  | 'GET_COOKIES'
+  | 'SET_COOKIE'
+  | 'EMULATE_DEVICE'
+  | 'INTERCEPT_REQUEST'
+  | 'BLOCK_URLS'
+  // CDP Environment Emulation
+  | 'NETWORK_THROTTLE'
+  | 'GET_EVENT_LISTENERS'
+  | 'FORCE_CSS_STATE'
+  | 'SET_GEOLOCATION'
+  | 'SET_TIMEZONE'
+  | 'EMULATE_MEDIA'
+  | 'PDF_PAGE'
+  | 'SCREENSHOT_FULL_PAGE'
+  // Phase 24: CDP tools
+  | 'UPLOAD_FILE'
+  | 'JS_COVERAGE'
+  | 'ANIMATION_SPEED'
+  | 'CLEAR_SITE_DATA';
 
 export interface Message {
   type: MessageType;

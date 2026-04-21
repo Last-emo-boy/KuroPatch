@@ -9,7 +9,9 @@
     "storage",
     "scripting",
     "webNavigation",
-    "debugger"
+    "debugger",
+    "cookies",
+    "tabs"
   ],
   "host_permissions": [
     "<all_urls>"

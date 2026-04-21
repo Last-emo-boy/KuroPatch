@@ -28,7 +28,7 @@ export async function callAIWithTools(
   messages: AIMessage[],
   executeTool: (call: ToolCall) => Promise<ToolResult>,
   onEvent: OnEvent,
-  maxIterations: number = 10,
+  maxIterations: number = 25,
   signal?: AbortSignal,
 ): Promise<string> {
   const config = await getAIConfig();
@@ -44,7 +44,7 @@ export async function callAIWithTools(
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     iterations++;
 
-    let response: { text: string; toolCalls: ToolCall[] };
+    let response: { text: string; toolCalls: ToolCall[]; stopReason?: string };
 
     if (config.type === 'anthropic') {
       response = await callAnthropicWithTools(config, systemPrompt, conversationMessages, signal);
@@ -58,6 +58,11 @@ export async function callAIWithTools(
       onEvent({ type: 'text', text: response.text });
     }
 
+    // Detect max_tokens truncation
+    if (response.stopReason === 'max_tokens' || response.stopReason === 'length') {
+      onEvent({ type: 'text', text: '\n\n⚠️ *Response was truncated due to token limit. The AI may have been cut off mid-sentence.*' });
+    }
+
     // If no tool calls, we're done
     if (response.toolCalls.length === 0) {
       onEvent({ type: 'done' });
@@ -67,6 +72,7 @@ export async function callAIWithTools(
     // Execute tool calls
     const toolResults: ToolResult[] = [];
     for (const call of response.toolCalls) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       onEvent({ type: 'tool_call', toolCall: call });
       const result = await executeTool(call);
       toolResults.push(result);
@@ -87,6 +93,8 @@ export async function callAIWithTools(
     });
   }
 
+  // Max iterations reached — warn user instead of silent exit
+  onEvent({ type: 'text', text: `\n\n⚠️ *Reached maximum tool call limit (${maxIterations} iterations). You can continue the conversation to pick up where I left off.*` });
   onEvent({ type: 'done' });
   return fullText;
 }
@@ -97,14 +105,14 @@ async function callAnthropicWithTools(
   systemPrompt: string,
   messages: AIMessage[],
   signal?: AbortSignal,
-): Promise<{ text: string; toolCalls: ToolCall[] }> {
+): Promise<{ text: string; toolCalls: ToolCall[]; stopReason?: string }> {
   const url = `${config.baseUrl.replace(/\/$/, '')}/v1/messages`;
 
   const apiMessages = buildAnthropicMessages(messages);
 
   const body: any = {
     model: config.model,
-    max_tokens: config.maxTokens ?? 4096,
+    max_tokens: config.maxTokens ?? 8192,
     system: systemPrompt,
     messages: apiMessages,
     tools: toolsForAnthropic(),
@@ -133,6 +141,7 @@ async function callAnthropicWithTools(
 
   let text = '';
   const toolCalls: ToolCall[] = [];
+  const stopReason = data.stop_reason; // 'end_turn', 'tool_use', 'max_tokens'
 
   for (const block of data.content || []) {
     if (block.type === 'text') {
@@ -146,7 +155,7 @@ async function callAnthropicWithTools(
     }
   }
 
-  return { text, toolCalls };
+  return { text, toolCalls, stopReason };
 }
 
 function buildAnthropicMessages(messages: AIMessage[]): any[] {
@@ -214,7 +223,7 @@ async function callOpenAIWithTools(
   systemPrompt: string,
   messages: AIMessage[],
   signal?: AbortSignal,
-): Promise<{ text: string; toolCalls: ToolCall[] }> {
+): Promise<{ text: string; toolCalls: ToolCall[]; stopReason?: string }> {
   const url = `${config.baseUrl.replace(/\/$/, '')}/chat/completions`;
 
   const apiMessages = buildOpenAIMessages(systemPrompt, messages);
@@ -226,6 +235,7 @@ async function callOpenAIWithTools(
   };
 
   if (config.maxTokens) body.max_tokens = config.maxTokens;
+  else body.max_tokens = 8192;
   if (config.temperature !== undefined) body.temperature = config.temperature;
 
   const resp = await fetch(url, {
@@ -246,6 +256,7 @@ async function callOpenAIWithTools(
   const data = await resp.json();
   const choice = data.choices?.[0];
   const text = choice?.message?.content || '';
+  const stopReason = choice?.finish_reason; // 'stop', 'tool_calls', 'length'
   const toolCalls: ToolCall[] = [];
 
   if (choice?.message?.tool_calls) {
@@ -262,7 +273,7 @@ async function callOpenAIWithTools(
     }
   }
 
-  return { text, toolCalls };
+  return { text, toolCalls, stopReason };
 }
 
 function buildOpenAIMessages(systemPrompt: string, messages: AIMessage[]): any[] {

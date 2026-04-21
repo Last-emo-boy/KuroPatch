@@ -57,6 +57,42 @@ const TOOL_ICONS: Record<string, string> = {
   visual_query: '👁️',
   enable_stealth: '🥷',
   disable_stealth: '🔓',
+  fill_form: '📋',
+  navigate: '🧭',
+  extract_table: '📊',
+  extract_links: '🔗',
+  query_selector_all: '🔍',
+  get_cookies: '🍪',
+  set_cookie: '🍪',
+  emulate_device: '📱',
+  intercept_request: '🔀',
+  block_urls: '🚫',
+  network_throttle: '🐌',
+  get_event_listeners: '👂',
+  force_css_state: '🎭',
+  set_geolocation: '📍',
+  set_timezone: '🕐',
+  emulate_media: '🌗',
+  pdf_page: '📄',
+  search_text: '🔎',
+  toggle_class: '🏷️',
+  insert_element: '➕',
+  // Phase 24
+  hover: '🖱️',
+  double_click: '👆',
+  right_click: '🖱️',
+  upload_file: '📎',
+  focus: '🎯',
+  blur: '💨',
+  observe_dom: '👁️',
+  get_computed_style: '🎨',
+  monitor_events: '📡',
+  js_coverage: '📊',
+  animation_speed: '🎬',
+  list_iframes: '🪟',
+  pierce_shadow: '👻',
+  extract_meta: '🏷️',
+  clear_site_data: '🧹',
 };
 
 export function getToolIcon(name: string): string {
@@ -79,11 +115,29 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
         break;
 
       case 'modify_style':
-        result = await sendToContent('MODIFY_STYLE', {
-          selector: args.selector,
-          property: args.property,
-          value: args.value,
-        });
+        if (args.styles) {
+          // Batch mode: multiple properties at once
+          const stylesJson = (args.styles as string).replace(/'/g, "\\'");
+          result = await sendToContent('INJECT_JS', {
+            code: `(function(){
+  const el = document.querySelector('${(args.selector as string).replace(/'/g, "\\'")}');
+  if (!el) return { error: 'Element not found' };
+  const styles = JSON.parse('${stylesJson}');
+  const results = {};
+  for (const [prop, val] of Object.entries(styles)) {
+    el.style.setProperty(prop, val);
+    results[prop] = { set: val, computed: window.getComputedStyle(el).getPropertyValue(prop) };
+  }
+  return { ok: true, selector: '${(args.selector as string).replace(/'/g, "\\'")}', properties: results };
+})()`
+          });
+        } else {
+          result = await sendToContent('MODIFY_STYLE', {
+            selector: args.selector,
+            property: args.property,
+            value: args.value,
+          });
+        }
         break;
 
       case 'modify_text':
@@ -115,52 +169,309 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
         result = await sendToContent('INJECT_CSS', { css: args.css });
         break;
 
-      case 'inject_js':
-        result = await sendToContent('INJECT_JS', { code: args.code });
+      case 'inject_js': {
+        let code = args.code as string;
+        if (args.awaitPromise) {
+          // Wrap in async IIFE if not already
+          if (!code.trim().startsWith('(async') && !code.trim().startsWith('async')) {
+            code = `(async () => { ${code} })()`;
+          }
+        }
+        result = await sendToContent('INJECT_JS', { code, timeout: args.timeout, allFrames: args.allFrames });
         break;
+      }
 
       case 'click':
-        result = await sendToContent('AUTOMATE', { type: 'click', selector: args.selector });
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const el = document.querySelector('${(args.selector as string).replace(/'/g, "\\'")}');
+  if (!el) return { error: 'Element not found: ${(args.selector as string).replace(/'/g, "\\'")}' };
+  const cs = window.getComputedStyle(el);
+  if (cs.display === 'none') return { error: 'Element is hidden (display:none).' };
+  if (cs.visibility === 'hidden') return { error: 'Element is hidden (visibility:hidden).' };
+  const rect = el.getBoundingClientRect();
+  if (rect.bottom < 0 || rect.top > window.innerHeight) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const btn = ${args.button === 'right' ? 2 : args.button === 'middle' ? 1 : 0};
+  const count = ${(args.clickCount as number) || 1};
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const common = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: btn, view: window };
+  for (let i = 0; i < count; i++) {
+    el.dispatchEvent(new MouseEvent('mousedown', common));
+    el.dispatchEvent(new MouseEvent('mouseup', common));
+    el.dispatchEvent(new MouseEvent('click', common));
+  }
+  if (count >= 2) el.dispatchEvent(new MouseEvent('dblclick', common));
+  if (btn === 2) el.dispatchEvent(new MouseEvent('contextmenu', common));
+  return { ok: true };
+})()`
+        });
         break;
 
-      case 'type_text':
-        result = await sendToContent('AUTOMATE', { type: 'input', selector: args.selector, value: args.text });
+      case 'type_text': {
+        const sel = (args.selector as string).replace(/'/g, "\\'");
+        const text = (args.text as string).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const el = document.querySelector('${sel}');
+  if (!el) return { error: 'Element not found: ${sel}' };
+  const cs = window.getComputedStyle(el);
+  if (cs.display === 'none') return { error: 'Element is hidden (display:none).' };
+  if (el.disabled) return { error: 'Element is disabled.' };
+  if (el.readOnly) return { error: 'Element is readOnly.' };
+  const rect = el.getBoundingClientRect();
+  if (rect.bottom < 0 || rect.top > window.innerHeight) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+    || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+  if (nativeSetter) nativeSetter.call(el, '${text}');
+  else el.value = '${text}';
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return { ok: true };
+})()`
+        });
         break;
+      }
 
       case 'scroll_to':
         if (args.selector) {
-          result = await sendToContent('AUTOMATE', { type: 'scrollToElement', selector: args.selector });
+          const scrollBehavior = (args.behavior as string) || 'smooth';
+          result = await sendToContent('INJECT_JS', {
+            code: `(function(){
+  const el = document.querySelector('${(args.selector as string).replace(/'/g, "\\'")}');
+  if (!el) return { error: 'Element not found' };
+  el.scrollIntoView({ behavior: '${scrollBehavior}', block: 'center' });
+  return { ok: true, scrollY: window.scrollY };
+})()`
+          });
         } else {
           result = await sendToContent('AUTOMATE', { type: 'scroll', x: args.x || 0, y: args.y || 0 });
         }
         break;
 
-      case 'read_text':
-        result = await sendToContent('AUTOMATE', { type: 'readText', selector: args.selector });
-        break;
+      case 'read_text': {
+        if (args.mode === 'structured') {
+          const sel = (args.selector as string).replace(/'/g, "\\'");
+          result = await sendToContent('INJECT_JS', {
+            code: `(function(){
+  const el = document.querySelector('${sel}');
+  if (!el) return { error: 'Element not found' };
+  const tag = el.tagName.toLowerCase();
 
-      case 'get_page_info':
-        result = await sendToBackground('GET_PAGE_CONTEXT');
-        break;
+  // Table → structured JSON
+  if (tag === 'table') {
+    const hRow = el.querySelector('thead tr') || el.querySelector('tr');
+    const headers = [];
+    if (hRow) hRow.querySelectorAll('th, td').forEach(c => headers.push(c.textContent.trim()));
+    const rows = [];
+    const body = el.querySelectorAll('tbody tr');
+    const all = body.length > 0 ? body : el.querySelectorAll('tr');
+    const start = body.length > 0 ? 0 : 1;
+    for (let i = start; i < Math.min(all.length, 50); i++) {
+      const cells = all[i].querySelectorAll('td, th');
+      const row = {};
+      cells.forEach((c, j) => { row[headers[j] || 'col_'+j] = c.textContent.trim(); });
+      rows.push(row);
+    }
+    return { type: 'table', headers, rows, rowCount: rows.length };
+  }
 
-      case 'get_console_logs':
-        result = await sendToBackground('GET_HOOK_EVENTS');
-        break;
+  // List (ul/ol) → array
+  if (tag === 'ul' || tag === 'ol') {
+    const items = [];
+    el.querySelectorAll(':scope > li').forEach(li => items.push(li.textContent.trim().slice(0, 200)));
+    return { type: 'list', items, count: items.length };
+  }
 
-      case 'get_network_requests':
-        result = await sendToBackground('GET_NETWORK_REQUESTS');
-        if (args.filter && Array.isArray(result)) {
-          const f = (args.filter as string).toLowerCase();
-          result = (result as any[]).filter(r => r.url?.toLowerCase().includes(f));
+  // Form → fields
+  if (tag === 'form') {
+    const fields = [];
+    el.querySelectorAll('input, select, textarea').forEach(inp => {
+      const t = inp.tagName.toLowerCase();
+      const label = (function(){
+        const id = inp.id;
+        if (id) { const l = document.querySelector('label[for="'+id+'"]'); if (l) return l.textContent.trim(); }
+        const w = inp.closest('label'); if (w) return w.textContent.trim().slice(0, 60);
+        return inp.getAttribute('aria-label') || inp.placeholder || null;
+      })();
+      fields.push({
+        tag: t, type: inp.type || t, name: inp.name || null,
+        value: (inp.value || '').slice(0, 100), label,
+        required: inp.required, disabled: inp.disabled,
+      });
+    });
+    return { type: 'form', fields, fieldCount: fields.length, action: el.action || null, method: el.method || 'get' };
+  }
+
+  // Fallback: plain text
+  return { type: 'text', text: (el.innerText || el.textContent || '').trim().slice(0, 3000) };
+})()`
+          });
+        } else {
+          result = await sendToContent('AUTOMATE', { type: 'readText', selector: args.selector });
         }
         break;
+      }
 
-      case 'start_hooks':
-        result = await sendToBackground('INJECT_HOOKS', {
-          fetch: true, xhr: true, console: true, errors: true,
-          domMutation: true, scriptInject: true, events: false,
-        });
+      case 'get_page_info': {
+        if (args.section) {
+          // Section deep-dive mode
+          const sel = (args.section as string).replace(/'/g, "\\'");
+          result = await sendToContent('INJECT_JS', {
+            code: `(function(){
+  const root = document.querySelector('${sel}');
+  if (!root) return { error: 'Section not found: ${sel}' };
+
+  // Detailed DOM tree
+  const parts = [];
+  function walk(el, depth) {
+    if (depth > 6 || parts.length > 120) return;
+    const tag = el.tagName.toLowerCase();
+    const id = el.id ? '#' + el.id : '';
+    const cls = el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\\s+/).slice(0,2).join('.') : '';
+    const indent = '  '.repeat(depth);
+    const text = el.childNodes.length === 1 && el.childNodes[0].nodeType === 3 ? el.textContent.trim().slice(0,60) : '';
+    parts.push(indent + '<' + tag + id + cls + '>' + (text ? ' "' + text + '"' : ''));
+    Array.from(el.children).slice(0, 10).forEach(c => walk(c, depth + 1));
+  }
+  walk(root, 0);
+
+  // All interactive elements
+  const interactives = [];
+  root.querySelectorAll('a,button,input,select,textarea,[role="button"],[onclick],[tabindex]').forEach(el => {
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return;
+    const tag = el.tagName.toLowerCase();
+    let text = tag === 'input' || tag === 'textarea' ? (el.placeholder || el.value || '') : (el.textContent || '').trim().slice(0,60);
+    let sel2 = tag;
+    if (el.id) sel2 = '#' + el.id;
+    else if (el.className && typeof el.className === 'string' && el.className.trim()) sel2 = tag + '.' + el.className.trim().split(/\\s+/)[0];
+    interactives.push({ tag, text: text.slice(0,60), selector: sel2, type: el.type || el.getAttribute('role') || tag });
+  });
+
+  // Full text content
+  const fullText = (root.innerText || root.textContent || '').trim().slice(0, 5000);
+
+  return {
+    section: '${sel}',
+    tag: root.tagName.toLowerCase(),
+    childCount: root.children.length,
+    domTree: parts.join('\\n'),
+    interactiveElements: interactives,
+    fullText,
+    boundingRect: root.getBoundingClientRect(),
+  };
+})()`
+          });
+        } else {
+          result = await sendToBackground('GET_PAGE_CONTEXT');
+        }
         break;
+      }
+
+      case 'get_console_logs': {
+        let logs = await sendToBackground('GET_HOOK_EVENTS') as any[];
+        if (!Array.isArray(logs) || logs.length === 0) {
+          // Auto-inject hooks if not started (fixes silent empty results)
+          await sendToBackground('INJECT_HOOKS', { console: true, errors: true, fetch: false, xhr: false, domMutation: false, scriptInject: false, events: false });
+          // Wait briefly for hooks to capture initial state
+          await new Promise(r => setTimeout(r, 500));
+          logs = await sendToBackground('GET_HOOK_EVENTS') as any[];
+          if (!Array.isArray(logs)) logs = [];
+        }
+        // Filter to console-type events
+        logs = logs.filter((e: any) => e.type === 'console' || e.type === 'error');
+        // Apply level filter
+        if (args.level) {
+          const levels = (args.level as string).split(',').map(l => l.trim().toLowerCase());
+          logs = logs.filter((e: any) => {
+            const eventLevel = e.detail?.level || (e.type === 'error' ? 'error' : 'log');
+            return levels.includes(eventLevel);
+          });
+        }
+        // Apply search filter
+        if (args.search) {
+          const s = (args.search as string).toLowerCase();
+          logs = logs.filter((e: any) => e.summary?.toLowerCase().includes(s));
+        }
+        // Limit
+        const logLimit = Math.min((args.limit as number) || 50, 200);
+        result = logs.slice(-logLimit);
+        break;
+      }
+
+      case 'get_network_requests': {
+        // If waitForNew, snapshot current count and poll for new ones
+        if (args.waitForNew) {
+          const baseline = ((await sendToBackground('GET_NETWORK_REQUESTS') as any[]) || []);
+          const baselineCount = baseline.length;
+          const filterFn = (list: any[]) => {
+            let items = list.slice(baselineCount); // Only new items
+            if (args.filter) { const f = (args.filter as string).toLowerCase(); items = items.filter((r: any) => r.url?.toLowerCase().includes(f)); }
+            if (args.status) { const s = String(args.status).toLowerCase(); items = items.filter((r: any) => { const c = r.status; if (s==='failed') return r.failed||c>=400; if (s==='4xx') return c>=400&&c<500; if (s==='5xx') return c>=500; return c===parseInt(s); }); }
+            if (args.method) { const m = (args.method as string).toUpperCase(); items = items.filter((r: any) => r.method === m); }
+            if (args.type) { items = items.filter((r: any) => r.type === args.type); }
+            return items;
+          };
+          // Poll for up to 10s
+          let newReqs: any[] = [];
+          for (let i = 0; i < 20; i++) {
+            await new Promise(r => setTimeout(r, 500));
+            const all = ((await sendToBackground('GET_NETWORK_REQUESTS') as any[]) || []);
+            newReqs = filterFn(all);
+            if (newReqs.length > 0) break;
+          }
+          result = { requests: newReqs, total: newReqs.length, returned: newReqs.length, waitedForNew: true };
+          break;
+        }
+
+        let netResult = await sendToBackground('GET_NETWORK_REQUESTS') as any[];
+        if (!Array.isArray(netResult)) netResult = [];
+        // Apply filters
+        if (args.filter) {
+          const f = (args.filter as string).toLowerCase();
+          netResult = netResult.filter((r: any) => r.url?.toLowerCase().includes(f));
+        }
+        if (args.status) {
+          const s = String(args.status).toLowerCase();
+          netResult = netResult.filter((r: any) => {
+            const code = r.status;
+            if (s === 'failed') return r.failed || code >= 400;
+            if (s === '4xx') return code >= 400 && code < 500;
+            if (s === '5xx') return code >= 500;
+            return code === parseInt(s);
+          });
+        }
+        if (args.method) {
+          const m = (args.method as string).toUpperCase();
+          netResult = netResult.filter((r: any) => r.method === m);
+        }
+        if (args.type) {
+          netResult = netResult.filter((r: any) => r.type === args.type);
+        }
+        // Sort by time descending, then limit
+        netResult.sort((a: any, b: any) => (b.startTime ?? 0) - (a.startTime ?? 0));
+        const limit = Math.min((args.limit as number) || 50, 200);
+        const total = netResult.length;
+        result = { requests: netResult.slice(0, limit), total, returned: Math.min(total, limit) };
+        break;
+      }
+
+      case 'start_hooks': {
+        const typesStr = args.types as string | undefined;
+        let hookConfig: Record<string, boolean | string>;
+        if (typesStr && typesStr !== 'all') {
+          hookConfig = { fetch: false, xhr: false, console: false, errors: false, domMutation: false, scriptInject: false, events: false };
+          for (const t of typesStr.split(',').map(s => s.trim())) {
+            if (t in hookConfig) (hookConfig as any)[t] = true;
+          }
+        } else {
+          hookConfig = { fetch: true, xhr: true, console: true, errors: true, domMutation: true, scriptInject: true, events: false };
+        }
+        if (args.urlFilter) (hookConfig as any).urlFilter = args.urlFilter;
+        result = await sendToBackground('INJECT_HOOKS', hookConfig);
+        break;
+      }
 
       case 'hide_element':
         result = await sendToContent('MODIFY_DOM', {
@@ -177,11 +488,81 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
         break;
 
       case 'wait_for':
-        result = await sendToContent('AUTOMATE', {
-          type: 'waitForSelector',
-          selector: args.selector,
-          timeout: args.timeout || 5000,
-        });
+        if (args.networkIdle) {
+          // Network idle mode: wait until no network requests for 500ms
+          const niTimeout = Math.min((args.timeout as number) || 10000, 30000);
+          result = await sendToContent('INJECT_JS', {
+            code: `(async function(){
+  const start = Date.now();
+  const timeout = ${niTimeout};
+  const idleThreshold = 500;
+  let lastActivity = Date.now();
+  let pending = 0;
+  const origFetch = window.fetch;
+  const origXhrOpen = XMLHttpRequest.prototype.open;
+  const origXhrSend = XMLHttpRequest.prototype.send;
+  // Track fetch
+  window.fetch = function(...a) {
+    pending++; lastActivity = Date.now();
+    return origFetch.apply(this, a).finally(() => { pending--; lastActivity = Date.now(); });
+  };
+  // Track XHR
+  XMLHttpRequest.prototype.open = function(...a) { return origXhrOpen.apply(this, a); };
+  XMLHttpRequest.prototype.send = function(...a) {
+    pending++; lastActivity = Date.now();
+    this.addEventListener('loadend', () => { pending--; lastActivity = Date.now(); }, { once: true });
+    return origXhrSend.apply(this, a);
+  };
+  try {
+    while (Date.now() - start < timeout) {
+      await new Promise(r => setTimeout(r, 100));
+      if (pending === 0 && Date.now() - lastActivity >= idleThreshold) {
+        return { ok: true, idle: true, waited: Date.now() - start, message: 'Network idle detected' };
+      }
+    }
+    return { ok: false, idle: false, waited: timeout, pending, message: 'Network still active after timeout' };
+  } finally {
+    window.fetch = origFetch;
+    XMLHttpRequest.prototype.open = origXhrOpen;
+    XMLHttpRequest.prototype.send = origXhrSend;
+  }
+})()`
+          });
+        } else if (args.absent) {
+          // Wait for element to DISAPPEAR
+          const absentSel = (args.selector as string).replace(/'/g, "\\'");
+          const absentTimeout = Math.min((args.timeout as number) || 5000, 30000);
+          const absentPoll = Math.max(Math.min((args.pollInterval as number) || 200, 2000), 50);
+          const checkVis = args.visible ? 'true' : 'false';
+          result = await sendToContent('INJECT_JS', {
+            code: `(async function(){
+  const start = Date.now();
+  const timeout = ${absentTimeout};
+  const poll = ${absentPoll};
+  const checkVisible = ${checkVis};
+  while (Date.now() - start < timeout) {
+    const el = document.querySelector('${absentSel}');
+    if (!el) return { ok: true, absent: true, waited: Date.now() - start };
+    if (checkVisible) {
+      const cs = window.getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0')
+        return { ok: true, absent: true, hiddenButInDOM: true, waited: Date.now() - start };
+    }
+    await new Promise(r => setTimeout(r, poll));
+  }
+  return { ok: false, absent: false, waited: Date.now() - start, message: 'Element still present after timeout' };
+})()`
+          });
+        } else {
+          result = await sendToContent('AUTOMATE', {
+            type: 'waitForSelector',
+            selector: args.selector,
+            timeout: args.timeout || 5000,
+            visible: args.visible,
+            condition: args.condition,
+            pollInterval: args.pollInterval,
+          });
+        }
         break;
 
       case 'get_page_sections':
@@ -192,16 +573,46 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
         result = await sendToContent('AUTOMATE', { type: 'select', selector: args.selector, value: args.value });
         break;
 
-      case 'keypress':
-        result = await sendToContent('AUTOMATE', {
-          type: 'keyboard',
-          key: args.key,
-          modifiers: args.modifiers,
-        });
+      case 'keypress': {
+        // Support combo ("Ctrl+A") and sequence (["Tab","Tab","Enter"])
+        const seqStr = args.sequence as string | undefined;
+        if (seqStr) {
+          let keys: string[];
+          try { keys = JSON.parse(seqStr); } catch { result = { error: 'Invalid JSON in sequence parameter' }; break; }
+          result = await sendToContent('INJECT_JS', {
+            code: `(async function(){
+  const keys = ${JSON.stringify(keys)};
+  for (const k of keys) {
+    const opts = { key: k, code: 'Key' + k, bubbles: true, cancelable: true };
+    document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', opts));
+    document.activeElement?.dispatchEvent(new KeyboardEvent('keyup', opts));
+    await new Promise(r => setTimeout(r, 50));
+  }
+  return { ok: true, keysPressed: keys.length };
+})()`
+          });
+        } else {
+          const keyStr = args.key as string;
+          // Parse combo like "Ctrl+Shift+A"
+          const parts = keyStr.split('+').map(s => s.trim());
+          const key = parts.pop() || keyStr;
+          const mods = (args.modifiers as string || '').split(',').map(s => s.trim().toLowerCase());
+          for (const p of parts) mods.push(p.toLowerCase());
+          result = await sendToContent('AUTOMATE', {
+            type: 'keyboard',
+            key,
+            modifiers: mods.filter(Boolean),
+          });
+        }
         break;
+      }
 
       case 'check_exists':
-        result = await sendToContent('CHECK_EXISTS', { selector: args.selector });
+        result = await sendToContent('CHECK_EXISTS', {
+          selector: args.selector,
+          retries: args.retries,
+          retryDelay: args.retryDelay,
+        });
         break;
 
       case 'check_text_contains':
@@ -293,12 +704,23 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
 
       // --- Screenshot & Visual tools ---
       case 'screenshot':
-        result = await sendToBackground('SCREENSHOT');
+        if (args.fullPage) {
+          result = await sendToBackground('SCREENSHOT_FULL_PAGE', {
+            format: args.format || 'png',
+            quality: args.quality,
+          });
+        } else {
+          result = await sendToBackground('SCREENSHOT', {
+            format: args.format || 'png',
+            quality: args.quality,
+          });
+        }
         break;
 
       case 'highlight_element': {
         const hlColor = (args.color as string) || '#7c6aff';
         const hlDuration = (args.duration as number) || 1500;
+        const hlLabel = args.label ? (args.label as string).replace(/'/g, "\\'").replace(/\\/g, '\\\\') : '';
         result = await sendToContent('INJECT_JS', {
           code: `(function(){
             const el = document.querySelector('${(args.selector as string).replace(/'/g, "\\'")}');
@@ -308,6 +730,16 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
             el.style.outlineOffset = '2px';
             el.style.boxShadow = '0 0 12px ${hlColor}80';
             el.style.transition = 'outline 0.3s, box-shadow 0.3s';
+            ${hlLabel ? `
+            const badge = document.createElement('div');
+            badge.textContent = '${hlLabel}';
+            badge.style.cssText = 'position:absolute;z-index:999999;background:${hlColor};color:#fff;padding:2px 8px;border-radius:4px;font:12px/1.4 system-ui;white-space:nowrap;pointer-events:none;';
+            const rect = el.getBoundingClientRect();
+            badge.style.left = (rect.left + window.scrollX) + 'px';
+            badge.style.top = (rect.top + window.scrollY - 22) + 'px';
+            document.body.appendChild(badge);
+            setTimeout(() => badge.remove(), ${hlDuration});
+            ` : ''}
             setTimeout(() => { el.style.cssText = orig; }, ${hlDuration});
             return { ok: true };
           })()`
@@ -373,10 +805,10 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
             const issues = [];
             // Images without alt
             root.querySelectorAll('img:not([alt])').forEach(el => {
-              issues.push({ type: 'error', rule: 'img-alt', message: 'Image missing alt text', selector: el.src?.slice(0,80) || 'img' });
+              issues.push({ type: 'error', rule: 'img-alt', message: 'Image missing alt text', selector: el.src?.slice(0,80) || 'img', fix: 'Add descriptive alt attribute to this image', tool: 'modify_attribute' });
             });
             root.querySelectorAll('img[alt=""]').forEach(el => {
-              issues.push({ type: 'warning', rule: 'img-alt-empty', message: 'Image has empty alt text (decorative?)', selector: el.src?.slice(0,80) || 'img' });
+              issues.push({ type: 'warning', rule: 'img-alt-empty', message: 'Image has empty alt text (decorative?)', selector: el.src?.slice(0,80) || 'img', fix: 'If decorative, add role="presentation". Otherwise add meaningful alt text.', tool: 'modify_attribute' });
             });
             // Form inputs without labels
             root.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button])').forEach(el => {
@@ -385,7 +817,7 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
               const hasAria = el.getAttribute('aria-label') || el.getAttribute('aria-labelledby');
               const wrapped = el.closest('label');
               if (!hasLabel && !hasAria && !wrapped) {
-                issues.push({ type: 'error', rule: 'input-label', message: 'Input missing label', selector: el.name || el.type || 'input' });
+                issues.push({ type: 'error', rule: 'input-label', message: 'Input missing label', selector: el.name || el.type || 'input', fix: 'Add aria-label attribute describing the input purpose', tool: 'modify_attribute' });
               }
             });
             // Empty links/buttons
@@ -394,16 +826,16 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
               const aria = el.getAttribute('aria-label');
               const title = el.getAttribute('title');
               if (!text && !aria && !title && !el.querySelector('img,svg')) {
-                issues.push({ type: 'error', rule: 'empty-interactive', message: 'Empty ' + el.tagName.toLowerCase() + ' (no text, aria-label, or title)', selector: el.className?.slice(0,40) || el.tagName });
+                issues.push({ type: 'error', rule: 'empty-interactive', message: 'Empty ' + el.tagName.toLowerCase() + ' (no text, aria-label, or title)', selector: el.className?.slice(0,40) || el.tagName, fix: 'Add aria-label or visible text content', tool: 'modify_attribute' });
               }
             });
             // Missing document language
             if (!document.documentElement.lang) {
-              issues.push({ type: 'warning', rule: 'html-lang', message: 'Missing lang attribute on <html>' });
+              issues.push({ type: 'warning', rule: 'html-lang', message: 'Missing lang attribute on <html>', fix: 'Add lang="en" (or appropriate language code) to <html>', tool: 'modify_attribute' });
             }
             // Missing page title
             if (!document.title.trim()) {
-              issues.push({ type: 'warning', rule: 'page-title', message: 'Page has no title' });
+              issues.push({ type: 'warning', rule: 'page-title', message: 'Page has no title', fix: 'Add a descriptive <title> element', tool: 'inject_js' });
             }
             // Low contrast candidates (basic heuristic)
             const body = root.querySelector('body') || root;
@@ -418,7 +850,7 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
               }
             });
             if (lowContrast > 0) {
-              issues.push({ type: 'warning', rule: 'color-contrast', message: lowContrast + ' elements with same text/background color' });
+              issues.push({ type: 'warning', rule: 'color-contrast', message: lowContrast + ' elements with same text/background color', fix: 'Ensure text color contrasts with background (WCAG ratio >= 4.5:1)', tool: 'modify_style' });
             }
             // Missing heading hierarchy
             const headings = root.querySelectorAll('h1,h2,h3,h4,h5,h6');
@@ -426,7 +858,7 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
             headings.forEach(h => {
               const level = parseInt(h.tagName[1]);
               if (prevLevel > 0 && level > prevLevel + 1) {
-                issues.push({ type: 'warning', rule: 'heading-order', message: 'Heading level skipped: h' + prevLevel + ' → h' + level });
+                issues.push({ type: 'warning', rule: 'heading-order', message: 'Heading level skipped: h' + prevLevel + ' → h' + level, fix: 'Use sequential heading levels (h1 → h2 → h3)', tool: 'modify_html' });
               }
               prevLevel = level;
             });
@@ -494,10 +926,21 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
         result = await sendToContent('INJECT_JS', {
           code: `(async function(){
   const el = document.querySelector('${sel}');
-  if (!el) return { error: 'Element not found' };
+  if (!el) return { error: 'Element not found: ${sel}' };
+  const cs = window.getComputedStyle(el);
   const rect = el.getBoundingClientRect();
-  const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
+  if (cs.display === 'none') return { error: 'Element is hidden (display:none). Use show_element or scroll_to first.', selector: '${sel}' };
+  if (cs.visibility === 'hidden') return { error: 'Element is hidden (visibility:hidden).', selector: '${sel}' };
+  if (parseFloat(cs.opacity) === 0) return { error: 'Element is invisible (opacity:0).', selector: '${sel}' };
+  if (rect.width === 0 && rect.height === 0) return { error: 'Element has zero size — may be collapsed or not rendered.', selector: '${sel}' };
+  const vw = window.innerWidth, vh = window.innerHeight;
+  if (rect.bottom < 0 || rect.top > vh || rect.right < 0 || rect.left > vw) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await new Promise(r => setTimeout(r, 300));
+  }
+  const rect2 = el.getBoundingClientRect();
+  const cx = rect2.left + rect2.width / 2;
+  const cy = rect2.top + rect2.height / 2;
   // Random offset within 30% of element size to mimic imprecise human aim
   const ox = cx + (Math.random() - 0.5) * rect.width * 0.3;
   const oy = cy + (Math.random() - 0.5) * rect.height * 0.3;
@@ -551,7 +994,18 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
         result = await sendToContent('INJECT_JS', {
           code: `(async function(){
   const el = document.querySelector('${sel}');
-  if (!el) return { error: 'Element not found' };
+  if (!el) return { error: 'Element not found: ${sel}' };
+  const cs = window.getComputedStyle(el);
+  if (cs.display === 'none') return { error: 'Element is hidden (display:none).', selector: '${sel}' };
+  if (cs.visibility === 'hidden') return { error: 'Element is hidden (visibility:hidden).', selector: '${sel}' };
+  if (el.disabled) return { error: 'Element is disabled.', selector: '${sel}' };
+  if (el.readOnly) return { error: 'Element is readOnly.', selector: '${sel}' };
+  const rect = el.getBoundingClientRect();
+  const vw = window.innerWidth, vh = window.innerHeight;
+  if (rect.bottom < 0 || rect.top > vh || rect.right < 0 || rect.left > vw) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await new Promise(r => setTimeout(r, 300));
+  }
   el.focus();
   el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   await new Promise(r => setTimeout(r, 50));
@@ -606,10 +1060,18 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
         result = await sendToContent('INJECT_JS', {
           code: `(async function(){
   const el = document.querySelector('${sel}');
-  if (!el) return { error: 'Element not found' };
+  if (!el) return { error: 'Element not found: ${sel}' };
+  const cs = window.getComputedStyle(el);
+  if (cs.display === 'none') return { error: 'Element is hidden (display:none). Cannot move mouse to hidden element.', selector: '${sel}' };
   const rect = el.getBoundingClientRect();
-  const tx = rect.left + rect.width / 2 + (Math.random() - 0.5) * rect.width * 0.2;
-  const ty = rect.top + rect.height / 2 + (Math.random() - 0.5) * rect.height * 0.2;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  if (rect.bottom < 0 || rect.top > vh || rect.right < 0 || rect.left > vw) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await new Promise(r => setTimeout(r, 300));
+  }
+  const updRect = el.getBoundingClientRect();
+  const tx = updRect.left + updRect.width / 2 + (Math.random() - 0.5) * updRect.width * 0.2;
+  const ty = updRect.top + updRect.height / 2 + (Math.random() - 0.5) * updRect.height * 0.2;
 
   // Random start point near current viewport area
   const sx = Math.random() * window.innerWidth;
@@ -702,8 +1164,19 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
           code: `(async function(){
   const srcEl = document.querySelector('${from}');
   const tgtEl = document.querySelector('${to}');
-  if (!srcEl) return { error: 'Source element not found' };
-  if (!tgtEl) return { error: 'Target element not found' };
+  if (!srcEl) return { error: 'Source element not found: ${from}' };
+  if (!tgtEl) return { error: 'Target element not found: ${to}' };
+  const srcCs = window.getComputedStyle(srcEl);
+  const tgtCs = window.getComputedStyle(tgtEl);
+  if (srcCs.display === 'none') return { error: 'Source element is hidden (display:none).', selector: '${from}' };
+  if (tgtCs.display === 'none') return { error: 'Target element is hidden (display:none).', selector: '${to}' };
+  // Auto-scroll source into view
+  const srcR = srcEl.getBoundingClientRect();
+  const vw = window.innerWidth, vh = window.innerHeight;
+  if (srcR.bottom < 0 || srcR.top > vh || srcR.right < 0 || srcR.left > vw) {
+    srcEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await new Promise(r => setTimeout(r, 300));
+  }
 
   const sr = srcEl.getBoundingClientRect();
   const tr = tgtEl.getBoundingClientRect();
@@ -947,6 +1420,19 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
       bounds: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
       center: { x: Math.round(rect.x + rect.width/2), y: Math.round(rect.y + rect.height/2) },
       disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
+      ...(tag === 'input' || tag === 'select' || tag === 'textarea' ? {
+        label: (function(){
+          const id = el.id;
+          if (id) { const lbl = document.querySelector('label[for="'+id+'"]'); if (lbl) return lbl.textContent.trim().slice(0,60); }
+          const wrap = el.closest('label'); if (wrap) return wrap.textContent.trim().slice(0,60);
+          return el.getAttribute('aria-label') || el.getAttribute('placeholder') || null;
+        })(),
+        required: el.required || el.getAttribute('aria-required') === 'true',
+        name: el.name || null,
+        value: (el.value || '').slice(0, 40) || null,
+        pattern: el.pattern || null,
+      } : {}),
+      ariaLabel: el.getAttribute('aria-label') || null,
     });
   });
   return { elements, total: elements.length, viewport: { width: vw, height: vh } };
@@ -994,12 +1480,763 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
         break;
       }
 
+      // ========== Batch & Extraction tools ==========
+
+      case 'fill_form': {
+        const fieldsStr = args.fields as string;
+        let fields: Array<{selector: string; value: string}>;
+        try { fields = JSON.parse(fieldsStr); } catch { result = { error: 'Invalid JSON in fields parameter' }; break; }
+        if (!Array.isArray(fields) || fields.length === 0) { result = { error: 'fields must be a non-empty JSON array' }; break; }
+        const submitSel = args.submit ? (args.submit as string).replace(/'/g, "\\'") : '';
+        const fieldsJson = JSON.stringify(fields).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        result = await sendToContent('INJECT_JS', {
+          code: `(async function(){
+  const fields = JSON.parse('${fieldsJson}');
+  const results = [];
+  const nativeInputSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+  const nativeTextareaSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+  const nativeSelectSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+
+  for (const f of fields) {
+    const el = document.querySelector(f.selector);
+    if (!el) { results.push({ selector: f.selector, ok: false, error: 'not found' }); continue; }
+    const tag = el.tagName.toLowerCase();
+    const type = (el.type || '').toLowerCase();
+    try {
+      if (tag === 'select') {
+        if (nativeSelectSetter) nativeSelectSetter.call(el, f.value);
+        else el.value = f.value;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      } else if (type === 'checkbox' || type === 'radio') {
+        const want = f.value === 'true' || f.value === '1';
+        if (el.checked !== want) el.click();
+      } else if (tag === 'input' || tag === 'textarea') {
+        const setter = tag === 'textarea' ? (nativeTextareaSetter || nativeInputSetter) : nativeInputSetter;
+        if (setter) setter.call(el, f.value);
+        else el.value = f.value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      } else {
+        el.textContent = f.value;
+      }
+      results.push({ selector: f.selector, ok: true });
+    } catch (e) {
+      results.push({ selector: f.selector, ok: false, error: e.message });
+    }
+  }
+
+  let submitResult = null;
+  if ('${submitSel}') {
+    const btn = document.querySelector('${submitSel}');
+    if (btn) { btn.click(); submitResult = { ok: true }; }
+    else { submitResult = { error: 'Submit button not found' }; }
+  }
+
+  const filled = results.filter(r => r.ok).length;
+  const failed = results.filter(r => !r.ok).length;
+  return { filled, failed, total: results.length, details: results, submitResult };
+})()`
+        });
+        break;
+      }
+
+      case 'navigate': {
+        if (args.url) {
+          result = await sendToBackground('NAVIGATE', { url: args.url, waitFor: args.waitFor, waitUntil: args.waitUntil });
+        } else if (args.action) {
+          result = await sendToBackground('NAVIGATE', { action: args.action, waitFor: args.waitFor, waitUntil: args.waitUntil });
+        } else {
+          result = { error: 'Provide either url or action parameter' };
+        }
+        break;
+      }
+
+      case 'extract_table': {
+        const sel = (args.selector as string).replace(/'/g, "\\'");
+        const maxRows = Math.min((args.maxRows as number) || 200, 1000);
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const table = document.querySelector('${sel}');
+  if (!table || table.tagName.toLowerCase() !== 'table') return { error: 'Table not found: ${sel}' };
+
+  // Extract headers
+  const headerRow = table.querySelector('thead tr') || table.querySelector('tr');
+  const headers = [];
+  if (headerRow) {
+    headerRow.querySelectorAll('th, td').forEach(cell => {
+      headers.push(cell.textContent.trim());
+    });
+  }
+
+  // Extract rows
+  const rows = [];
+  const bodyRows = table.querySelectorAll('tbody tr');
+  const allRows = bodyRows.length > 0 ? bodyRows : table.querySelectorAll('tr');
+  const startIdx = (bodyRows.length > 0) ? 0 : 1; // skip header row if no tbody
+  let count = 0;
+  for (let i = startIdx; i < allRows.length && count < ${maxRows}; i++) {
+    const cells = allRows[i].querySelectorAll('td, th');
+    if (cells.length === 0) continue;
+    const row = {};
+    cells.forEach((cell, j) => {
+      const key = headers[j] || ('col_' + j);
+      row[key] = cell.textContent.trim();
+    });
+    rows.push(row);
+    count++;
+  }
+
+  return {
+    headers,
+    rows,
+    rowCount: rows.length,
+    totalRows: (bodyRows.length > 0 ? bodyRows : table.querySelectorAll('tr')).length - (bodyRows.length > 0 ? 0 : 1),
+    truncated: count >= ${maxRows},
+  };
+})()`
+        });
+        break;
+      }
+
+      case 'extract_links': {
+        const scope = args.selector ? (args.selector as string).replace(/'/g, "\\'") : '';
+        const filter = args.filter ? (args.filter as string).replace(/'/g, "\\'").toLowerCase() : '';
+        const extOnly = args.external_only ? 'true' : 'false';
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const root = '${scope}' ? document.querySelector('${scope}') : document;
+  if (!root) return { error: 'Scope element not found: ${scope}' };
+  const origin = location.origin;
+  const links = [];
+  root.querySelectorAll('a[href]').forEach(a => {
+    const href = a.href;
+    const text = a.textContent.trim().slice(0, 100);
+    const isExternal = !href.startsWith(origin) && href.startsWith('http');
+    if (${extOnly} && !isExternal) return;
+    if ('${filter}' && !href.toLowerCase().includes('${filter}')) return;
+    links.push({
+      href,
+      text,
+      target: a.target || '_self',
+      isExternal,
+      rel: a.rel || null,
+    });
+  });
+  return { links, total: links.length };
+})()`
+        });
+        break;
+      }
+
+      case 'query_selector_all': {
+        const sel = (args.selector as string).replace(/'/g, "\\'");
+        const limit = Math.min((args.limit as number) || 20, 100);
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const els = document.querySelectorAll('${sel}');
+  const total = els.length;
+  const items = [];
+  for (let i = 0; i < Math.min(total, ${limit}); i++) {
+    const el = els[i];
+    const rect = el.getBoundingClientRect();
+    const cs = window.getComputedStyle(el);
+    const tag = el.tagName.toLowerCase();
+    let uniqSel = tag;
+    if (el.id) uniqSel = '#' + el.id;
+    else if (el.className && typeof el.className === 'string' && el.className.trim()) {
+      uniqSel = tag + '.' + el.className.trim().split(/\\s+/).slice(0,2).join('.');
+    }
+    // nth-of-type if needed for uniqueness
+    if (!el.id) {
+      const parent = el.parentElement;
+      if (parent) {
+        const sibs = Array.from(parent.children).filter(c => c.tagName === el.tagName);
+        if (sibs.length > 1) uniqSel += ':nth-of-type(' + (sibs.indexOf(el) + 1) + ')';
+      }
+    }
+    items.push({
+      index: i,
+      tag,
+      text: (el.textContent || '').trim().slice(0, 80),
+      selector: uniqSel,
+      bounds: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+      visible: cs.display !== 'none' && cs.visibility !== 'hidden' && rect.width > 0 && rect.height > 0,
+      attributes: Object.fromEntries([...el.attributes].slice(0, 8).map(a => [a.name, a.value.slice(0, 60)])),
+    });
+  }
+  return { matches: items, total, returned: items.length, truncated: total > ${limit} };
+})()`
+        });
+        break;
+      }
+
+      case 'get_cookies':
+        result = await sendToBackground('GET_COOKIES', { name: args.name, domain: args.domain });
+        break;
+
+      case 'set_cookie':
+        result = await sendToBackground('SET_COOKIE', {
+          name: args.name,
+          value: args.value,
+          domain: args.domain,
+          path: args.path || '/',
+          secure: args.secure,
+          httpOnly: args.httpOnly,
+          sameSite: args.sameSite,
+          expiresInSeconds: args.expiresInSeconds,
+        });
+        break;
+
+      case 'emulate_device':
+        result = await sendToBackground('EMULATE_DEVICE', {
+          width: args.width,
+          height: args.height,
+          deviceScaleFactor: args.deviceScaleFactor,
+          userAgent: args.userAgent,
+          preset: args.preset,
+          action: args.action,
+        });
+        break;
+
+      case 'intercept_request':
+        result = await sendToBackground('INTERCEPT_REQUEST', {
+          urlPattern: args.urlPattern,
+          action: args.action,
+          responseBody: args.responseBody,
+          responseStatus: args.responseStatus,
+          responseHeaders: args.responseHeaders,
+          headers: args.headers,
+        });
+        break;
+
+      case 'block_urls':
+        result = await sendToBackground('BLOCK_URLS', {
+          patterns: args.patterns,
+          action: args.action,
+        });
+        break;
+
+      // ========== CDP Environment tools ==========
+
+      case 'network_throttle':
+        result = await sendToBackground('NETWORK_THROTTLE', {
+          preset: args.preset,
+          downloadKbps: args.downloadKbps,
+          uploadKbps: args.uploadKbps,
+          latencyMs: args.latencyMs,
+          action: args.action,
+        });
+        break;
+
+      case 'get_event_listeners': {
+        const gel_sel = (args.selector as string).replace(/'/g, "\\'");
+        result = await sendToBackground('GET_EVENT_LISTENERS', { selector: gel_sel });
+        break;
+      }
+
+      case 'force_css_state':
+        result = await sendToBackground('FORCE_CSS_STATE', {
+          selector: args.selector,
+          states: args.states,
+          action: args.action,
+        });
+        break;
+
+      case 'set_geolocation':
+        result = await sendToBackground('SET_GEOLOCATION', {
+          latitude: args.latitude,
+          longitude: args.longitude,
+          accuracy: args.accuracy,
+          action: args.action,
+        });
+        break;
+
+      case 'set_timezone':
+        result = await sendToBackground('SET_TIMEZONE', {
+          timezoneId: args.timezoneId,
+          action: args.action,
+        });
+        break;
+
+      case 'emulate_media':
+        result = await sendToBackground('EMULATE_MEDIA', {
+          colorScheme: args.colorScheme,
+          mediaType: args.mediaType,
+          reducedMotion: args.reducedMotion,
+          forcedColors: args.forcedColors,
+          action: args.action,
+        });
+        break;
+
+      case 'pdf_page':
+        result = await sendToBackground('PDF_PAGE', {
+          landscape: args.landscape,
+          printBackground: args.printBackground !== false,
+          scale: args.scale,
+          paperWidth: args.paperWidth,
+          paperHeight: args.paperHeight,
+        });
+        break;
+
+      // ========== DOM Utility tools ==========
+
+      case 'search_text': {
+        const stQuery = (args.query as string).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const stRegex = args.regex ? 'true' : 'false';
+        const stVisOnly = args.visibleOnly ? 'true' : 'false';
+        const stLimit = (args.limit as number) || 50;
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const query = '${stQuery}';
+  const useRegex = ${stRegex};
+  const visibleOnly = ${stVisOnly};
+  const limit = ${stLimit};
+  const matches = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const regex = useRegex ? new RegExp(query, 'gi') : null;
+  let node;
+  while ((node = walker.nextNode()) && matches.length < limit) {
+    const text = node.textContent || '';
+    const hasMatch = regex ? regex.test(text) : text.toLowerCase().includes(query.toLowerCase());
+    if (!hasMatch) continue;
+    if (regex) regex.lastIndex = 0;
+    const el = node.parentElement;
+    if (!el) continue;
+    if (visibleOnly) {
+      const cs = window.getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
+    }
+    const path = [];
+    let p = el;
+    while (p && p !== document.body) {
+      let seg = p.tagName.toLowerCase();
+      if (p.id) seg += '#' + p.id;
+      else if (p.className) seg += '.' + p.className.toString().split(' ')[0];
+      path.unshift(seg);
+      p = p.parentElement;
+    }
+    matches.push({
+      text: text.trim().slice(0, 200),
+      element: path.join(' > '),
+      tag: el.tagName.toLowerCase(),
+      visible: !(window.getComputedStyle(el).display === 'none'),
+    });
+  }
+  return { matches, total: matches.length };
+})()`
+        });
+        break;
+      }
+
+      case 'toggle_class': {
+        const tcSel = (args.selector as string).replace(/'/g, "\\'");
+        const tcAdd = args.add ? (args.add as string).replace(/'/g, "\\'") : '';
+        const tcRemove = args.remove ? (args.remove as string).replace(/'/g, "\\'") : '';
+        const tcToggle = args.toggle ? (args.toggle as string).replace(/'/g, "\\'") : '';
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const el = document.querySelector('${tcSel}');
+  if (!el) return { error: 'Element not found: ${tcSel}' };
+  ${tcAdd ? `'${tcAdd}'.split(' ').forEach(c => c && el.classList.add(c));` : ''}
+  ${tcRemove ? `'${tcRemove}'.split(' ').forEach(c => c && el.classList.remove(c));` : ''}
+  ${tcToggle ? `'${tcToggle}'.split(' ').forEach(c => c && el.classList.toggle(c));` : ''}
+  return { ok: true, classList: Array.from(el.classList) };
+})()`
+        });
+        break;
+      }
+
+      case 'insert_element': {
+        const ieSel = (args.selector as string).replace(/'/g, "\\'");
+        const iePos = (args.position as string) || 'beforeend';
+        const ieHtml = (args.html as string).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const el = document.querySelector('${ieSel}');
+  if (!el) return { error: 'Element not found: ${ieSel}' };
+  el.insertAdjacentHTML('${iePos}', '${ieHtml}');
+  return { ok: true, position: '${iePos}', parentTag: el.tagName.toLowerCase(), childCount: el.childElementCount };
+})()`
+        });
+        break;
+      }
+
       case 'enable_stealth':
         result = await sendToBackground('ENABLE_STEALTH');
         break;
 
       case 'disable_stealth':
         result = await sendToBackground('DISABLE_STEALTH');
+        break;
+
+      // ========== Phase 24: Interaction tools ==========
+
+      case 'hover': {
+        const sel = (args.selector as string).replace(/'/g, "\\'");
+        const dur = Math.min((args.duration as number) || 500, 10000);
+        result = await sendToContent('INJECT_JS', {
+          code: `(async function(){
+  const el = document.querySelector('${sel}');
+  if (!el) return { error: 'Element not found: ${sel}' };
+  const cs = window.getComputedStyle(el);
+  if (cs.display === 'none') return { error: 'Element is hidden (display:none).' };
+  const rect = el.getBoundingClientRect();
+  if (rect.bottom < 0 || rect.top > window.innerHeight) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await new Promise(r => setTimeout(r, 300));
+  }
+  const r2 = el.getBoundingClientRect();
+  const cx = r2.left + r2.width / 2, cy = r2.top + r2.height / 2;
+  const common = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window };
+  el.dispatchEvent(new MouseEvent('mouseover', common));
+  el.dispatchEvent(new MouseEvent('mouseenter', { ...common, bubbles: false }));
+  el.dispatchEvent(new MouseEvent('mousemove', common));
+  await new Promise(r => setTimeout(r, ${dur}));
+  const csAfter = window.getComputedStyle(el);
+  return { ok: true, hoveredFor: ${dur}, tagName: el.tagName.toLowerCase(), text: (el.textContent || '').trim().slice(0, 80), stylesAfterHover: { color: csAfter.color, backgroundColor: csAfter.backgroundColor, display: csAfter.display, opacity: csAfter.opacity, visibility: csAfter.visibility } };
+})()`
+        });
+        break;
+      }
+
+      case 'double_click': {
+        const sel = (args.selector as string).replace(/'/g, "\\'");
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const el = document.querySelector('${sel}');
+  if (!el) return { error: 'Element not found: ${sel}' };
+  const cs = window.getComputedStyle(el);
+  if (cs.display === 'none') return { error: 'Element is hidden (display:none).' };
+  const rect = el.getBoundingClientRect();
+  if (rect.bottom < 0 || rect.top > window.innerHeight) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const r2 = el.getBoundingClientRect();
+  const cx = r2.left + r2.width / 2, cy = r2.top + r2.height / 2;
+  const common = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0, view: window };
+  el.dispatchEvent(new MouseEvent('mousedown', common));
+  el.dispatchEvent(new MouseEvent('mouseup', common));
+  el.dispatchEvent(new MouseEvent('click', common));
+  el.dispatchEvent(new MouseEvent('mousedown', common));
+  el.dispatchEvent(new MouseEvent('mouseup', common));
+  el.dispatchEvent(new MouseEvent('click', common));
+  el.dispatchEvent(new MouseEvent('dblclick', common));
+  return { ok: true };
+})()`
+        });
+        break;
+      }
+
+      case 'right_click': {
+        const sel = (args.selector as string).replace(/'/g, "\\'");
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const el = document.querySelector('${sel}');
+  if (!el) return { error: 'Element not found: ${sel}' };
+  const cs = window.getComputedStyle(el);
+  if (cs.display === 'none') return { error: 'Element is hidden (display:none).' };
+  const rect = el.getBoundingClientRect();
+  if (rect.bottom < 0 || rect.top > window.innerHeight) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const r2 = el.getBoundingClientRect();
+  const cx = r2.left + r2.width / 2, cy = r2.top + r2.height / 2;
+  const common = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 2, view: window };
+  el.dispatchEvent(new MouseEvent('mousedown', common));
+  el.dispatchEvent(new MouseEvent('mouseup', common));
+  el.dispatchEvent(new MouseEvent('contextmenu', common));
+  return { ok: true };
+})()`
+        });
+        break;
+      }
+
+      case 'upload_file':
+        result = await sendToBackground('UPLOAD_FILE', {
+          selector: args.selector,
+          fileName: args.fileName,
+          content: args.content,
+          mimeType: args.mimeType,
+          base64: args.base64,
+        });
+        break;
+
+      case 'focus': {
+        const sel = (args.selector as string).replace(/'/g, "\\'");
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const el = document.querySelector('${sel}');
+  if (!el) return { error: 'Element not found: ${sel}' };
+  el.focus();
+  el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+  return { ok: true, tag: el.tagName.toLowerCase(), activeElement: document.activeElement === el };
+})()`
+        });
+        break;
+      }
+
+      case 'blur': {
+        const sel = (args.selector as string).replace(/'/g, "\\'");
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const el = document.querySelector('${sel}');
+  if (!el) return { error: 'Element not found: ${sel}' };
+  el.blur();
+  el.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+  return { ok: true, tag: el.tagName.toLowerCase() };
+})()`
+        });
+        break;
+      }
+
+      // ========== Phase 24: Observation & Analysis tools ==========
+
+      case 'observe_dom': {
+        const obsSel = args.selector ? (args.selector as string).replace(/'/g, "\\'") : '';
+        const obsDur = Math.min((args.duration as number) || 3000, 15000);
+        const obsSubtree = args.subtree !== false;
+        const obsAttrs = args.attributes !== false;
+        const obsChildList = args.childList !== false;
+        const obsCharData = args.characterData !== false;
+        result = await sendToContent('INJECT_JS', {
+          code: `(async function(){
+  const root = '${obsSel}' ? document.querySelector('${obsSel}') : document.body;
+  if (!root) return { error: 'Element not found: ${obsSel}' };
+  const log = [];
+  const start = Date.now();
+  const observer = new MutationObserver(mutations => {
+    for (const m of mutations) {
+      const t = Date.now() - start;
+      if (m.type === 'childList') {
+        for (const n of m.addedNodes) {
+          if (n.nodeType === 1) log.push({ time: t, type: 'added', tag: n.tagName?.toLowerCase(), text: (n.textContent || '').slice(0, 60), parentSelector: m.target.tagName?.toLowerCase() });
+          else if (n.nodeType === 3 && n.textContent?.trim()) log.push({ time: t, type: 'textAdded', text: n.textContent.slice(0, 60) });
+        }
+        for (const n of m.removedNodes) {
+          if (n.nodeType === 1) log.push({ time: t, type: 'removed', tag: n.tagName?.toLowerCase(), text: (n.textContent || '').slice(0, 40) });
+        }
+      } else if (m.type === 'attributes') {
+        log.push({ time: t, type: 'attribute', target: m.target.tagName?.toLowerCase(), attr: m.attributeName, oldValue: m.oldValue?.slice(0, 60), newValue: m.target.getAttribute?.(m.attributeName)?.slice(0, 60) });
+      } else if (m.type === 'characterData') {
+        log.push({ time: t, type: 'textChanged', text: (m.target.textContent || '').slice(0, 60) });
+      }
+      if (log.length >= 200) return; // cap
+    }
+  });
+  observer.observe(root, { subtree: ${obsSubtree}, attributes: ${obsAttrs}, childList: ${obsChildList}, characterData: ${obsCharData}, attributeOldValue: true });
+  await new Promise(r => setTimeout(r, ${obsDur}));
+  observer.disconnect();
+  return { mutations: log, total: log.length, duration: ${obsDur}, target: '${obsSel}' || 'body' };
+})()`
+        });
+        break;
+      }
+
+      case 'get_computed_style': {
+        const gcsSel = (args.selector as string).replace(/'/g, "\\'");
+        const gcsProps = args.properties ? (args.properties as string).replace(/'/g, "\\'") : '';
+        const gcsPseudo = args.pseudoElement ? (args.pseudoElement as string).replace(/'/g, "\\'") : '';
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const el = document.querySelector('${gcsSel}');
+  if (!el) return { error: 'Element not found: ${gcsSel}' };
+  const pseudo = '${gcsPseudo}' || null;
+  const cs = window.getComputedStyle(el, pseudo);
+  const propsStr = '${gcsProps}';
+  if (propsStr) {
+    const props = propsStr.split(',').map(p => p.trim());
+    const result = {};
+    for (const p of props) result[p] = cs.getPropertyValue(p);
+    return { selector: '${gcsSel}', properties: result, pseudo: pseudo };
+  }
+  // Return key CSS properties
+  const keys = ['display','position','width','height','margin','padding','border','color','background-color','background','font-family','font-size','font-weight','line-height','text-align','text-decoration','opacity','visibility','overflow','z-index','float','flex','grid','gap','box-sizing','cursor','pointer-events','transform','transition','animation','box-shadow','border-radius','outline','top','right','bottom','left','max-width','min-width','max-height','min-height','white-space','word-break','text-overflow'];
+  const result = {};
+  for (const k of keys) {
+    const v = cs.getPropertyValue(k);
+    if (v && v !== 'none' && v !== 'normal' && v !== 'auto' && v !== '0px' && v !== 'rgba(0, 0, 0, 0)') result[k] = v;
+  }
+  return { selector: '${gcsSel}', properties: result, pseudo: pseudo, totalProperties: cs.length };
+})()`
+        });
+        break;
+      }
+
+      case 'monitor_events': {
+        const meSel = (args.selector as string).replace(/'/g, "\\'");
+        const meDur = Math.min((args.duration as number) || 5000, 15000);
+        const meTypes = args.eventTypes ? (args.eventTypes as string).replace(/'/g, "\\'") : '';
+        result = await sendToContent('INJECT_JS', {
+          code: `(async function(){
+  const el = document.querySelector('${meSel}');
+  if (!el) return { error: 'Element not found: ${meSel}' };
+  const defaultTypes = ['click','dblclick','mousedown','mouseup','mouseover','mouseenter','mouseleave','contextmenu','keydown','keyup','keypress','input','change','focus','blur','focusin','focusout','submit','scroll','wheel','touchstart','touchend','pointerdown','pointerup','dragstart','drop'];
+  const types = '${meTypes}' ? '${meTypes}'.split(',').map(t => t.trim()) : defaultTypes;
+  const log = [];
+  const start = Date.now();
+  const handlers = {};
+  for (const type of types) {
+    handlers[type] = (e) => {
+      const entry = { time: Date.now() - start, type: e.type, target: e.target?.tagName?.toLowerCase() };
+      if (e.clientX !== undefined) { entry.x = Math.round(e.clientX); entry.y = Math.round(e.clientY); }
+      if (e.key) entry.key = e.key;
+      if (e.target?.value !== undefined) entry.value = String(e.target.value).slice(0, 40);
+      if (e.defaultPrevented) entry.defaultPrevented = true;
+      log.push(entry);
+    };
+    el.addEventListener(type, handlers[type], true);
+  }
+  await new Promise(r => setTimeout(r, ${meDur}));
+  for (const type of types) el.removeEventListener(type, handlers[type], true);
+  return { events: log, total: log.length, duration: ${meDur}, selector: '${meSel}', monitored: types };
+})()`
+        });
+        break;
+      }
+
+      // ========== Phase 24: CDP-powered tools ==========
+
+      case 'js_coverage':
+        result = await sendToBackground('JS_COVERAGE', {
+          action: args.action,
+          detailed: args.detailed,
+        });
+        break;
+
+      case 'animation_speed':
+        result = await sendToBackground('ANIMATION_SPEED', {
+          rate: args.rate,
+        });
+        break;
+
+      // ========== Phase 24: Page structure tools ==========
+
+      case 'list_iframes': {
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const iframes = document.querySelectorAll('iframe');
+  const list = [];
+  iframes.forEach((iframe, i) => {
+    const rect = iframe.getBoundingClientRect();
+    const cs = window.getComputedStyle(iframe);
+    let url = '';
+    try { url = iframe.src || iframe.contentWindow?.location?.href || ''; } catch { url = iframe.src || '(cross-origin)'; }
+    list.push({
+      index: i,
+      src: url.slice(0, 300),
+      name: iframe.name || null,
+      id: iframe.id || null,
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      visible: cs.display !== 'none' && cs.visibility !== 'hidden' && rect.width > 0 && rect.height > 0,
+      sandbox: iframe.sandbox?.value || null,
+      loading: iframe.loading || 'eager',
+      allow: iframe.allow || null,
+    });
+  });
+  return { iframes: list, total: list.length };
+})()`
+        });
+        break;
+      }
+
+      case 'pierce_shadow': {
+        const psSel = (args.hostSelector as string).replace(/'/g, "\\'");
+        const psInner = (args.innerSelector as string).replace(/'/g, "\\'");
+        const psAction = (args.action as string) || 'query';
+        const psProp = args.property ? (args.property as string).replace(/'/g, "\\'") : '';
+        const psVal = args.value ? (args.value as string).replace(/'/g, "\\'") : '';
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const host = document.querySelector('${psSel}');
+  if (!host) return { error: 'Shadow host not found: ${psSel}' };
+  const shadow = host.shadowRoot;
+  if (!shadow) return { error: 'No shadow root on element (may be closed shadow DOM)' };
+  const el = shadow.querySelector('${psInner}');
+  if (!el) return { error: 'Inner element not found: ${psInner} inside shadow of ${psSel}' };
+  const action = '${psAction}';
+  if (action === 'text') return { ok: true, text: (el.textContent || '').trim().slice(0, 3000) };
+  if (action === 'click') { el.click(); return { ok: true, clicked: true }; }
+  if (action === 'modify-style') {
+    el.style.setProperty('${psProp}', '${psVal}');
+    return { ok: true, property: '${psProp}', value: '${psVal}' };
+  }
+  // query
+  const rect = el.getBoundingClientRect();
+  const cs = window.getComputedStyle(el);
+  return {
+    ok: true, tag: el.tagName.toLowerCase(), id: el.id || null,
+    className: el.className || null,
+    text: (el.textContent || '').trim().slice(0, 200),
+    bounds: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+    visible: cs.display !== 'none' && cs.visibility !== 'hidden',
+    attributes: Object.fromEntries([...el.attributes].slice(0, 15).map(a => [a.name, a.value.slice(0, 80)])),
+    childCount: el.children.length,
+  };
+})()`
+        });
+        break;
+      }
+
+      case 'extract_meta': {
+        result = await sendToContent('INJECT_JS', {
+          code: `(function(){
+  const meta = {};
+  meta.title = document.title;
+  meta.lang = document.documentElement.lang || null;
+  meta.charset = document.characterSet;
+  // Standard meta tags
+  const metas = {};
+  document.querySelectorAll('meta[name], meta[property]').forEach(m => {
+    const key = m.getAttribute('name') || m.getAttribute('property');
+    if (key) metas[key] = m.content;
+  });
+  meta.description = metas.description || null;
+  meta.keywords = metas.keywords || null;
+  meta.author = metas.author || null;
+  meta.viewport = metas.viewport || null;
+  meta.robots = metas.robots || null;
+  // Canonical
+  const canonical = document.querySelector('link[rel="canonical"]');
+  meta.canonical = canonical?.href || null;
+  // Open Graph
+  const og = {};
+  for (const [k, v] of Object.entries(metas)) {
+    if (k.startsWith('og:')) og[k.slice(3)] = v;
+  }
+  if (Object.keys(og).length > 0) meta.openGraph = og;
+  // Twitter Card
+  const twitter = {};
+  for (const [k, v] of Object.entries(metas)) {
+    if (k.startsWith('twitter:')) twitter[k.slice(8)] = v;
+  }
+  if (Object.keys(twitter).length > 0) meta.twitterCard = twitter;
+  // JSON-LD
+  const jsonLd = [];
+  document.querySelectorAll('script[type="application/ld+json"]').forEach(s => {
+    try { jsonLd.push(JSON.parse(s.textContent)); } catch {}
+  });
+  if (jsonLd.length > 0) meta.jsonLd = jsonLd;
+  // Favicons
+  const favicons = [];
+  document.querySelectorAll('link[rel*="icon"]').forEach(l => {
+    favicons.push({ rel: l.rel, href: l.href, sizes: l.sizes?.value || null, type: l.type || null });
+  });
+  if (favicons.length > 0) meta.favicons = favicons;
+  // Alternate links (hreflang, RSS)
+  const alternates = [];
+  document.querySelectorAll('link[rel="alternate"]').forEach(l => {
+    alternates.push({ href: l.href, hreflang: l.hreflang || null, type: l.type || null, title: l.title || null });
+  });
+  if (alternates.length > 0) meta.alternates = alternates;
+  return meta;
+})()`
+        });
+        break;
+      }
+
+      case 'clear_site_data':
+        result = await sendToBackground('CLEAR_SITE_DATA', {
+          types: args.types,
+        });
         break;
 
       default:
@@ -1094,8 +2331,12 @@ function formatSuccessResult(name: string, args: Record<string, unknown>, result
       return `Updated HTML of ${args.selector}`;
     case 'inject_css':
       return `Injected CSS (${(args.css as string).length} chars)`;
-    case 'inject_js':
-      return `Executed JS (${(args.code as string).length} chars)`;
+    case 'inject_js': {
+      const r = result as any;
+      const time = r?.executionTime ? ` (${r.executionTime}ms)` : '';
+      if (r?.error) return `JS error${time}: ${r.error}`;
+      return `Executed JS (${(args.code as string).length} chars)${time}`;
+    }
     case 'click':
       return `Clicked ${args.selector}`;
     case 'type_text':
@@ -1107,8 +2348,10 @@ function formatSuccessResult(name: string, args: Record<string, unknown>, result
     case 'get_page_info':
       return `Page info retrieved`;
     case 'get_network_requests': {
-      const reqs = Array.isArray(result) ? result : [];
-      return `${reqs.length} requests captured`;
+      const r = result as any;
+      const total = r?.total ?? (Array.isArray(result) ? (result as any[]).length : 0);
+      const returned = r?.returned ?? total;
+      return `${returned}/${total} requests captured`;
     }
     case 'hide_element':
       return `Hidden ${args.selector}`;
@@ -1122,8 +2365,11 @@ function formatSuccessResult(name: string, args: Record<string, unknown>, result
       return `Selected "${args.value}" in ${args.selector}`;
     case 'keypress':
       return `Pressed ${args.key}`;
-    case 'check_exists':
-      return `Element ${args.selector} ${(result as any)?.exists ? 'exists' : 'not found'}`;
+    case 'check_exists': {
+      const r = result as any;
+      const count = r?.count ?? (r?.exists ? 1 : 0);
+      return r?.exists ? `✅ ${args.selector} found (${count} match${count > 1 ? 'es' : ''})` : `❌ ${args.selector} not found`;
+    }
     case 'check_text_contains':
       return `Text check: ${(result as any)?.contains ? 'match found' : 'no match'}`;
     case 'remove_element':
@@ -1202,6 +2448,137 @@ function formatSuccessResult(name: string, args: Record<string, unknown>, result
       return `Stealth mode enabled — anti-detection active`;
     case 'disable_stealth':
       return `Stealth mode disabled`;
+    case 'fill_form': {
+      const r = result as any;
+      const inner = r?.result || r;
+      return `Form filled: ${inner?.filled ?? '?'}/${inner?.total ?? '?'} fields${inner?.submitResult ? ' + submitted' : ''}`;
+    }
+    case 'navigate': {
+      if (args.url) return `Navigated to ${(args.url as string).slice(0, 60)}`;
+      return `Navigation: ${args.action}`;
+    }
+    case 'extract_table': {
+      const r = result as any;
+      const inner = r?.result || r;
+      return `Table extracted: ${inner?.rowCount ?? '?'} rows, ${inner?.headers?.length ?? '?'} columns`;
+    }
+    case 'extract_links': {
+      const r = result as any;
+      const inner = r?.result || r;
+      return `${inner?.total ?? '?'} links extracted`;
+    }
+    case 'query_selector_all': {
+      const r = result as any;
+      const inner = r?.result || r;
+      return `${inner?.total ?? '?'} elements matched (returned ${inner?.returned ?? '?'})`;
+    }
+    case 'get_cookies': {
+      const r = result as any;
+      return `${Array.isArray(r) ? r.length : (r?.cookies?.length ?? '?')} cookies retrieved`;
+    }
+    case 'set_cookie':
+      return `Cookie "${args.name}" set`;
+    case 'emulate_device': {
+      if (args.action === 'reset') return 'Device emulation reset';
+      if (args.preset) return `Emulating ${args.preset}`;
+      return `Viewport: ${args.width}×${args.height}`;
+    }
+    case 'intercept_request': {
+      if (args.action === 'clear') return 'All request intercepts cleared';
+      return `Request intercept: ${args.action} on ${args.urlPattern || '*'}`;
+    }
+    case 'block_urls': {
+      if (args.action === 'clear') return 'All URL blocks cleared';
+      return `URL patterns blocked`;
+    }
+    case 'network_throttle': {
+      if (args.action === 'reset') return 'Network throttle reset to normal';
+      return `Network throttle: ${args.preset || 'custom'} (${args.downloadKbps || '?'}kbps↓ ${args.latencyMs || '?'}ms)`;
+    }
+    case 'get_event_listeners': {
+      const r = result as any;
+      const count = r?.listeners?.length || 0;
+      return `Found ${count} event listener(s) on ${args.selector}`;
+    }
+    case 'force_css_state': {
+      if (args.action === 'clear') return `Forced CSS states cleared on ${args.selector}`;
+      return `Forced CSS states [${args.states}] on ${args.selector}`;
+    }
+    case 'set_geolocation': {
+      if (args.action === 'reset') return 'Geolocation reset to real location';
+      return `Geolocation set: ${args.latitude}, ${args.longitude}`;
+    }
+    case 'set_timezone': {
+      if (args.action === 'reset') return 'Timezone reset';
+      return `Timezone set: ${args.timezoneId}`;
+    }
+    case 'emulate_media': {
+      if (args.action === 'reset') return 'Media emulation reset';
+      const parts = [];
+      if (args.colorScheme) parts.push(`color-scheme: ${args.colorScheme}`);
+      if (args.mediaType) parts.push(`media: ${args.mediaType}`);
+      if (args.reducedMotion) parts.push(`reduced-motion: ${args.reducedMotion}`);
+      return parts.join(', ') || 'Media emulated';
+    }
+    case 'pdf_page': {
+      return `PDF generated (${args.landscape ? 'landscape' : 'portrait'})`;
+    }
+    case 'search_text': {
+      const r = result as any;
+      return `Found ${r?.total || 0} match(es) for "${args.query}"`;
+    }
+    case 'toggle_class': {
+      const r = result as any;
+      return `Classes updated → [${(r?.classList || []).join(', ')}]`;
+    }
+    case 'insert_element':
+      return `HTML inserted ${args.position} ${args.selector}`;
+    // Phase 24
+    case 'hover':
+      return `Hovered ${args.selector} (${args.duration || 500}ms)`;
+    case 'double_click':
+      return `Double-clicked ${args.selector}`;
+    case 'right_click':
+      return `Right-clicked ${args.selector}`;
+    case 'upload_file':
+      return `Uploaded "${args.fileName}" to ${args.selector}`;
+    case 'focus':
+      return `Focused ${args.selector}`;
+    case 'blur':
+      return `Blurred ${args.selector}`;
+    case 'observe_dom': {
+      const r = result as any;
+      const inner = r?.result || r;
+      return `Observed ${inner?.total ?? 0} DOM mutations over ${args.duration || 3000}ms`;
+    }
+    case 'get_computed_style':
+      return `Computed styles for ${args.selector}${args.properties ? ` (${args.properties})` : ''}`;
+    case 'monitor_events': {
+      const r = result as any;
+      const inner = r?.result || r;
+      return `Captured ${inner?.total ?? 0} events over ${args.duration || 5000}ms on ${args.selector}`;
+    }
+    case 'js_coverage': {
+      if (args.action === 'start') return 'JS coverage collection started';
+      const r = result as any;
+      return `JS coverage: ${r?.scripts?.length ?? 0} scripts analyzed`;
+    }
+    case 'animation_speed':
+      return `Animation speed set to ${args.rate}x`;
+    case 'list_iframes': {
+      const r = result as any;
+      const inner = r?.result || r;
+      return `${inner?.total ?? 0} iframes found`;
+    }
+    case 'pierce_shadow':
+      return `Shadow DOM query: ${args.action || 'query'} on ${args.hostSelector} → ${args.innerSelector}`;
+    case 'extract_meta': {
+      const r = result as any;
+      const inner = r?.result || r;
+      return `Metadata extracted: "${inner?.title || '?'}"`;
+    }
+    case 'clear_site_data':
+      return `Site data cleared${args.types ? ` (${args.types})` : ' (all)'}`;
     default:
       return `Done`;
   }

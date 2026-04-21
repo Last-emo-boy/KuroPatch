@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import type { UserScript } from '../../shared/types';
 import { getScripts, updateScript, removeScript, addScript } from '../../shared/storage';
 
-export default function Scripts({ onBack }: { onBack: () => void }) {
+export default function Scripts() {
   const [scripts, setScripts] = useState<UserScript[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [editCode, setEditCode] = useState('');
@@ -193,7 +193,6 @@ export default function Scripts({ onBack }: { onBack: () => void }) {
   return (
     <div className="scripts-panel">
       <div className="scripts-header">
-        <button className="btn secondary" onClick={onBack} style={{ padding: '4px 10px', fontSize: 11 }}>← Chat</button>
         <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>Scripts</span>
         <button className="script-action-btn" onClick={() => fileInputRef.current?.click()} title="Import scripts">⬆</button>
         <button className="script-action-btn" onClick={handleExport} title="Export scripts" disabled={scripts.length === 0}>⬇</button>

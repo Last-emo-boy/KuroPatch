@@ -6,6 +6,12 @@
 (function () {
   const configEl = document.getElementById('__kp_hooks_script');
   const config = configEl?.dataset.config ? JSON.parse(configEl.dataset.config) : {};
+  const urlFilter = (config.urlFilter || '') as string;
+
+  function matchesUrlFilter(url: string): boolean {
+    if (!urlFilter) return true;
+    return url.toLowerCase().includes(urlFilter.toLowerCase());
+  }
 
   function emit(type: string, summary: string, detail?: unknown) {
     window.postMessage({
@@ -26,12 +32,28 @@
     window.fetch = async function (...args: Parameters<typeof fetch>) {
       const url = typeof args[0] === 'string' ? args[0] : (args[0] as Request).url;
       const method = (args[1]?.method || 'GET').toUpperCase();
-      emit('fetch', `${method} ${url}`, { url, method });
+      if (!matchesUrlFilter(url)) return originalFetch.apply(this, args);
+
+      const reqBody = args[1]?.body;
+      const reqBodyStr = typeof reqBody === 'string' ? reqBody.slice(0, 5000) : undefined;
+      emit('fetch', `${method} ${url}`, { url, method, requestBody: reqBodyStr });
 
       try {
         const resp = await originalFetch.apply(this, args);
+        // Clone and read response body for API-type requests
+        let responsePreview: string | undefined;
+        try {
+          const contentType = resp.headers.get('content-type') || '';
+          if (contentType.includes('json') || contentType.includes('text') || contentType.includes('xml')) {
+            const cloned = resp.clone();
+            const text = await cloned.text();
+            responsePreview = text.slice(0, 5000);
+          }
+        } catch { /* response body may not be readable */ }
+
         emit('fetch', `${method} ${url} → ${resp.status}`, {
           url, method, status: resp.status, ok: resp.ok,
+          responsePreview,
         });
         return resp;
       } catch (err: any) {
@@ -58,9 +80,22 @@
       const method = (this as any).__kp_method || 'GET';
       const url = (this as any).__kp_url || '';
 
+      if (!matchesUrlFilter(url)) return originalSend.apply(this, args);
+
+      // Capture request body
+      const reqBody = typeof args[0] === 'string' ? args[0].slice(0, 5000) : undefined;
+
       this.addEventListener('load', () => {
+        // Capture response body for text-based responses
+        let responsePreview: string | undefined;
+        try {
+          const ct = this.getResponseHeader('content-type') || '';
+          if (ct.includes('json') || ct.includes('text') || ct.includes('xml')) {
+            responsePreview = (this.responseText || '').slice(0, 5000);
+          }
+        } catch { /* ignore */ }
         emit('xhr', `${method} ${url} → ${this.status}`, {
-          url, method, status: this.status,
+          url, method, status: this.status, responsePreview,
         });
       });
 
@@ -68,7 +103,7 @@
         emit('xhr', `${method} ${url} → ERROR`, { url, method });
       });
 
-      emit('xhr', `${method} ${url} (sending)`, { url, method });
+      emit('xhr', `${method} ${url} (sending)`, { url, method, requestBody: reqBody });
       return originalSend.apply(this, args);
     };
   }
